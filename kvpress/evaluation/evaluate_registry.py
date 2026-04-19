@@ -10,6 +10,7 @@ from benchmarks.loogle.calculate_metrics import calculate_metrics as loogle_scor
 from benchmarks.math500.calculate_metrics import calculate_metrics as math500_scorer
 from benchmarks.needle_in_haystack.calculate_metrics import calculate_metrics as needle_in_haystack_scorer
 from benchmarks.ruler.calculate_metrics import calculate_metrics as ruler_scorer
+from benchmarks.scbench.calculate_metrics import calculate_metrics as scbench_scorer
 from benchmarks.zero_scrolls.calculate_metrics import calculate_metrics as zero_scrolls_scorer
 
 from kvpress import (
@@ -54,6 +55,12 @@ DATASET_REGISTRY = {
     "longbench-e": "Xnhyacinth/LongBench",
     "longbench-v2": "simonjegou/LongBench-v2",
     "needle_in_haystack": "alessiodevoto/paul_graham_essays",
+    # SCBench: raw schema is {id, context, multi_turns:[...]}. Run
+    # `evaluation/benchmarks/scbench/create_huggingface_dataset.py` to produce the
+    # flattened per-turn schema expected by evaluate.py; until published, point this
+    # entry at a local HF dataset dir (`load_dataset("./scbench_flat/<subset>")`) or
+    # your own HF Hub repo id.
+    "scbench": "microsoft/SCBench",
     # Datasets used to be used for decoding compression
     "aime25": "alessiodevoto/aime25",
     "math500": "alessiodevoto/math500",
@@ -68,6 +75,7 @@ SCORER_REGISTRY = {
     "longbench-e": longbench_scorer_e,
     "longbench-v2": longbenchv2_scorer,
     "needle_in_haystack": needle_in_haystack_scorer,
+    "scbench": scbench_scorer,
     "aime25": aime25_scorer,
     "math500": math500_scorer,
 }
