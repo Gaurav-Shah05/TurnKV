@@ -98,6 +98,10 @@ Informal. One bullet per working session. Link PRs, ADRs, experiments by filenam
 - **Grading & deadlines**: [project_logistics_grading.pdf](./project_logistics_grading.pdf) — final presentation 2026-04-30, final report 2026-05-03
 - **Paper template**: [mlsys2025style/](./mlsys2025style/)
 - **kvpress Press API**: [../kvpress/kvpress/presses/scorer_press.py](../kvpress/kvpress/presses/scorer_press.py) (override `score()`)
-- **SCBench dataset**: https://huggingface.co/datasets/microsoft/SCBench — see [`../kvpress/evaluation/benchmarks/scbench/README.md`](../kvpress/evaluation/benchmarks/scbench/README.md) for integration notes
+- **Benchmark plan** (revised 2026-04-19 — see [findings](../documentation/findings.md)):
+  - Primary conversational: **LongMemEval_S** (scaffold TBD)
+  - Primary coding: **ConvCodeWorld / ConvCodeBench** → [`../kvpress/evaluation/benchmarks/convcodeworld/README.md`](../kvpress/evaluation/benchmarks/convcodeworld/README.md)
+  - Topic-shift validation: **TopiOCQA** (scaffold TBD)
+  - Appendix: **SCBench** (demoted) → [`../kvpress/evaluation/benchmarks/scbench/README.md`](../kvpress/evaluation/benchmarks/scbench/README.md)
 - **EpiCache** (baseline, separate venv): `../epicache/` — cloned locally per `README.md`; evaluated on LongMemEval / LoCoMo / Realtalk
 - **Journal & findings**: [../documentation/journal.md](../documentation/journal.md), [../documentation/findings.md](../documentation/findings.md)

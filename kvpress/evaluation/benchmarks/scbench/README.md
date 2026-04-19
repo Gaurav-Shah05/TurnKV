@@ -1,6 +1,8 @@
 # SCBench
 
-[SCBench](https://arxiv.org/abs/2412.10319) (Li et al., ICLR 2025) evaluates long-context methods — including KV-cache eviction — across 12 task types under two modes: **multi-turn** (KV cache reused across turns within a session) and **multi-request** (cache reused across sessions with different queries). It is the primary benchmark for the TurnKV project.
+> **Status (2026-04-19): demoted to appendix benchmark.** Per-problem inspection revealed SCBench's "multi-turn" mode is N independent queries over a shared long context — not conversational. Primary benchmarks are now **LongMemEval_S** (conversational) and **ConvCodeWorld** (coding). SCBench is retained here under a reframed claim: "cross-query KV retention on shared contexts." See `documentation/findings.md` for the full rationale.
+
+[SCBench](https://arxiv.org/abs/2412.10319) (Li et al., ICLR 2025) evaluates long-context methods — including KV-cache eviction — across 12 task types under two modes: **multi-turn** (KV cache reused across turns within a session) and **multi-request** (cache reused across sessions with different queries).
 
 - Paper: https://arxiv.org/abs/2412.10319
 - Dataset: https://huggingface.co/datasets/microsoft/SCBench

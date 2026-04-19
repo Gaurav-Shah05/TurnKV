@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from benchmarks.aime25.calculate_metrics import calculate_metrics as aime25_scorer
+from benchmarks.convcodeworld.calculate_metrics import calculate_metrics as convcodeworld_scorer
 from benchmarks.infinite_bench.calculate_metrics import calculate_metrics as infinite_bench_scorer
 from benchmarks.longbench.calculate_metrics import calculate_metrics as longbench_scorer
 from benchmarks.longbench.calculate_metrics import calculate_metrics_e as longbench_scorer_e
@@ -59,8 +60,16 @@ DATASET_REGISTRY = {
     # `evaluation/benchmarks/scbench/create_huggingface_dataset.py` to produce the
     # flattened per-turn schema expected by evaluate.py; until published, point this
     # entry at a local HF dataset dir (`load_dataset("./scbench_flat/<subset>")`) or
-    # your own HF Hub repo id.
+    # your own HF Hub repo id. DEMOTED to appendix benchmark (see
+    # documentation/findings.md) — turns are independent queries over shared context,
+    # not truly conversational.
     "scbench": "microsoft/SCBench",
+    # ConvCodeWorld / ConvCodeBench: 1,140 BigCodeBench tasks x 5 feedback configs,
+    # each with 10-turn refinement trajectories. Run
+    # `evaluation/benchmarks/convcodeworld/create_huggingface_dataset.py` to produce
+    # the flattened per-(config,task,iteration) schema; evaluation uses per-turn
+    # pass/fail labels from the dataset itself.
+    "convcodeworld": "ConvCodeWorld/convcodebench",
     # Datasets used to be used for decoding compression
     "aime25": "alessiodevoto/aime25",
     "math500": "alessiodevoto/math500",
@@ -76,6 +85,7 @@ SCORER_REGISTRY = {
     "longbench-v2": longbenchv2_scorer,
     "needle_in_haystack": needle_in_haystack_scorer,
     "scbench": scbench_scorer,
+    "convcodeworld": convcodeworld_scorer,
     "aime25": aime25_scorer,
     "math500": math500_scorer,
 }

@@ -15,6 +15,15 @@ pdf_extracts/
 .claude/settings.local.json
 # Claude Code worktree machinery (per-agent, shouldn't be committed)
 .claude/worktrees/
+# Raw benchmark datasets — too big for git; each teammate extracts locally
+context/datasets/
+# Large benchmark tarballs at project root
+longmemeval-data-cleaned.tar.gz
+*.tar.gz
+*.tar.xz
+# Full per-turn token CSVs — regenerable via context/experiments/scripts/; only aggregated versions live in git
+context/experiments/*_per_turn_tokens.csv
+context/experiments/scbench_per_session_tokens.csv
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

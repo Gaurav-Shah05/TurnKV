@@ -31,6 +31,14 @@ cd ..
 # 3. Clone EpiCache baseline into a sibling folder (gitignored)
 git clone --depth 1 https://github.com/apple/ml-epicache.git epicache
 
+# 4. (Optional but required for LongMemEval) Download the cleaned LongMemEval data
+# Link: https://drive.google.com/file/d/1zo5C2sKsN3-2TUZt7kiRd2wsZLmyd-4y/view
+# Save it to the project root as longmemeval-data-cleaned.tar.gz, then:
+tar -xzf longmemeval-data-cleaned.tar.gz -C context/datasets/
+mv context/datasets/data context/datasets/longmemeval
+# Both the tarball and the extracted JSON are gitignored.
+# See context/experiments/longmemeval_cleanup_status.md for schema + cleanup notes.
+
 # 4. Set up a SEPARATE venv for EpiCache (it pins older torch/transformers/numpy
 #    that would conflict with kvpress — do NOT share a venv)
 cd epicache
@@ -64,10 +72,11 @@ cd kvpress && make test
 # Style / lint (kvpress)
 cd kvpress && make style
 
-# kvpress eval example (once SCBench integration is runnable — see kvpress/evaluation/benchmarks/scbench/README.md)
+# kvpress eval example (once the multi-turn harness ships)
+# See kvpress/evaluation/benchmarks/{convcodeworld,scbench,longmemeval,topiocqa}/README.md
 cd kvpress/evaluation
-python evaluate.py --dataset scbench --data_dir scbench_kv \
-    --press_name snapkv --compression_ratio 0.5 \
+python evaluate.py --dataset convcodeworld --data_dir CF_EF_UNIT_SNF \
+    --press_name snapkv --compression_ratio 0.875 \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct
 
 # EpiCache baseline run (separate venv)
@@ -83,12 +92,25 @@ bash scripts/run_epicache_eval_llama.sh 0 8 pair 4096 2048 False longmemeval 100
 - PR into `main`; `make test` (in `kvpress/`) must pass.
 - For any change that affects the API other teammates build against (press class signatures, metrics format, multi-turn harness interface), drop an ADR in `context/decisions/` first.
 
-## Status (2026-04-18)
+## Benchmark plan (revised 2026-04-19)
 
-- **Scaffolded**: SCBench benchmark loader + metrics (`kvpress/evaluation/benchmarks/scbench/`), team collaboration folders (`context/`, `documentation/`).
+Per-problem inspection of SCBench revealed its "multi-turn" mode is independent queries over a shared context, not conversational. The three proposed presses assume turn-to-turn dependency — SCBench doesn't exercise that. Full rationale in `documentation/findings.md`.
+
+| Role | Benchmark | Why |
+|------|-----------|-----|
+| Primary conversational | **LongMemEval_S** | ~115K-token histories, evidence placed many turns before probe. MIT. EpiCache ships a data converter. |
+| Primary coding | **ConvCodeWorld / ConvCodeBench** | 1,140 BigCodeBench × 5 feedback configs × 10-turn refinement trajectories. Verifiable pass/fail labels. |
+| Topic-shift validation | **TopiOCQA** | Ground-truth topic labels per turn — isolates Cross-Turn Accumulation's topic-shift detection. |
+| Appendix | **SCBench** (reframed) | Cross-query KV retention on shared contexts. Numbers still useful; claim rewritten. |
+
+## Status (2026-04-19)
+
+- **Scaffolded**: SCBench (demoted-appendix), ConvCodeWorld (primary coding), team collaboration folders.
+- **Not yet scaffolded**: LongMemEval, TopiOCQA — next.
+- **Shared blocker across all four**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`). ADR for its API lives at `context/decisions/001-multi-turn-harness.md` (TBD).
 - **Next up** (roughly in order):
-  1. Port SCBench metrics from upstream `microsoft/MInference/scbench/compute_scores.py` verbatim.
-  2. Implement the multi-turn harness in `kvpress/evaluation/multi_turn_evaluate.py`.
-  3. Scaffold the three turn-aware Press classes as `ScorerPress` subclasses with failing tests.
-  4. First EpiCache baseline run on LongMemEval or LoCoMo with DeepSeek-R1-Distill-Llama-8B (or Llama-3.1-8B-Instruct for paper-comparable numbers).
-  5. ADR: which model + budgets + datasets we standardize on.
+  1. ADR `001-multi-turn-harness.md` — lock down the turn-aware runner API before anyone codes against it.
+  2. Scaffold LongMemEval + TopiOCQA benchmarks following the ConvCodeWorld/SCBench template.
+  3. Port per-benchmark metrics to match upstream reference implementations.
+  4. Scaffold the three turn-aware Press classes as `ScorerPress` subclasses with failing tests.
+  5. First EpiCache baseline run on LongMemEval and LoCoMo with Llama-3.1-8B-Instruct (paper-comparable numbers) plus DeepSeek-R1-Distill-Llama-8B (stretch).

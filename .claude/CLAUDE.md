@@ -13,9 +13,21 @@ Three new KV-cache eviction "Press" classes for NVIDIA's kvpress, designed to be
 2. **Turn-Floor Press** — per-turn minimum budget (length-proportional) so early turns aren't fully evicted.
 3. **Role-Boundary Anchor Press** — retention bonus around role boundaries (user/assistant tokens) to preserve intent-bearing tokens.
 
-Primary benchmark: **SCBench** (Li et al., ICLR 2025). Primary baselines: SnapKV, StreamingLLM, ObservedAttention (H2O), KVzip, ExpectedAttention, all already in kvpress. External comparison: **EpiCache** (Apple, 2025) — the only existing multi-turn-aware method — run separately in `epicache/`.
+### Benchmark plan (final as of 2026-04-19 — see `documentation/findings.md` + ADR 001)
 
-Full proposal: `context/Project Proposal/MLSys_Project_Proposal.pdf`.
+Core assumption: **long context is permanent (KEEP bucket), only turn content gets compressed (COMPRESS bucket).**
+
+Two benchmarks cover two different signals:
+
+- **Primary coding (per-turn accuracy curve)**: **ConvCodeWorld / ConvCodeBench** (1,140 BigCodeBench tasks × 5 feedback configs × 10-turn refinement trajectories). Mode 2 replay — teacher-force reference prior iters, our model generates at each iter, execute against BigCodeBench tests for pass/fail. Gives a real per-turn curve.
+- **Primary conversational (single-probe accuracy on compressed long history)**: **LongMemEval_S** (500 probes × ~103K-token multi-session histories). Y1 setup — teacher-force the full prior history (~490 user/assistant turns), apply press at session boundaries, generate only at the probe. One score per probe. Direct head-to-head with EpiCache.
+- **Topic-shift validation (Loyalty/topic-shift detection only)**: **TopiOCQA**. Ground-truth topic labels per turn. Not used for compression sweeps — validates one component.
+
+SCBench and MultiDoc2Dial **dropped**: SCBench because turns are independent queries (no cross-turn dependency signal); MultiDoc2Dial because only ~230 tokens of compressible turn content per dialogue (padding docs doesn't help under the "context permanent" rule).
+
+Primary baselines: SnapKV, StreamingLLM, ObservedAttention (H2O), KVzip, ExpectedAttention — all already in kvpress. External comparison: **EpiCache** (Apple, 2025) — the only existing multi-turn-aware method — run separately in `epicache/`.
+
+Full proposal: `context/Project Proposal/MLSys_Project_Proposal.pdf`. Findings that justify this benchmark pivot are in `documentation/findings.md`.
 
 ## Repo structure
 
@@ -45,14 +57,16 @@ Any code change — new press class, metric tweak, eval harness, test — happen
 3. PR into `main`; `make test` must pass.
 4. Log observations to `documentation/journal.md` as you go. Promote to `documentation/findings.md` when consolidated.
 
-### SCBench integration status (as of 2026-04-18)
+### Benchmark scaffolding status (as of 2026-04-19)
 
-- Scaffolded at `kvpress/evaluation/benchmarks/scbench/` (loader, metrics, create_huggingface_dataset.py).
-- Registered in `kvpress/evaluation/evaluate_registry.py` as `"scbench"`.
-- **NOT yet runnable end-to-end.** Three TODOs in `kvpress/evaluation/benchmarks/scbench/README.md`:
-  1. Port metrics from `microsoft/MInference/scbench/compute_scores.py` verbatim.
-  2. Run the flattening script + either publish the reshaped HF dataset or load locally.
-  3. Implement `multi_turn_evaluate.py` — the turn-aware runner. This is the heart of the project.
+| Benchmark | Status | Location |
+|-----------|--------|----------|
+| SCBench | Scaffolded (loader + metrics + flattening script). Demoted to appendix — see `documentation/findings.md`. | `kvpress/evaluation/benchmarks/scbench/` |
+| ConvCodeWorld | Scaffolded (loader + metrics + flattening script). Primary coding benchmark. | `kvpress/evaluation/benchmarks/convcodeworld/` |
+| LongMemEval | **Not yet scaffolded.** Primary conversational. Reuse EpiCache's `data/longmemeval/convert_longmemeval.py` as the data-prep entry point. | TBD `kvpress/evaluation/benchmarks/longmemeval/` |
+| TopiOCQA | **Not yet scaffolded.** Topic-shift validation. Load via `datasets.load_dataset("McGill-NLP/TopiOCQA", "plain_text")`. | TBD `kvpress/evaluation/benchmarks/topiocqa/` |
+
+**Shared blocker**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`). The existing `evaluate.py` treats each question independently; all four benchmarks need a harness that preserves the KV cache across turns and re-applies the press at each boundary. This is the heart of the project. **Architecture and API locked down in `context/decisions/001-multi-turn-harness.md`** (2026-04-19). Teammates should implement against that ADR.
 
 ### EpiCache baseline
 
