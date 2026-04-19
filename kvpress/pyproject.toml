@@ -31,6 +31,10 @@ eval = [
     "bert-score>=0.3.13,<0.4",
     "jieba>=0.42.1",
     "fuzzywuzzy>=0.18.0",
+    "pyyaml>=6.0.1,<7",
+]
+modal = [
+    "modal>=0.64.0,<1",
 ]
 flash-attn = [
     "flash-attn"

@@ -1,171 +1,275 @@
-# SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 1993-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Scoring for SCBench (https://arxiv.org/abs/2412.10319).
+# Scoring helpers adapted from Microsoft MInference scbench/compute_scores.py (MIT License).
 
-NOTE: These metric functions are a first-pass approximation of the scoring used in
-microsoft/MInference/scbench/compute_scores.py. Before reporting numbers comparable
-to the SCBench paper, port the upstream implementations verbatim — especially for
-`scbench_repoqa`, `scbench_summary_with_needles`, and `scbench_repoqa_and_kv` which
-use composite scores.
-"""
+from __future__ import annotations
 
 import re
 import string
 from collections import Counter
+from typing import Any
 
-import numpy as np
-from rouge import Rouge
+import pandas as pd
+from tqdm import tqdm
 
-
-# ---------- Normalization helpers ----------
-
-def _normalize_answer(s: str) -> str:
-    """Lowercase, strip punctuation/articles, collapse whitespace."""
-    s = s.lower()
-    s = re.sub(r"\b(a|an|the)\b", " ", s)
-    s = "".join(ch for ch in s if ch not in set(string.punctuation))
-    s = " ".join(s.split())
-    return s
-
-
-# ---------- Metric primitives ----------
-
-def _exact_match(prediction: str, ground_truth: str, **_) -> float:
-    return float(_normalize_answer(prediction) == _normalize_answer(ground_truth))
-
-
-def _substring_match(prediction: str, ground_truth: str, **_) -> float:
-    """1.0 iff the (normalized) ground truth appears anywhere in the (normalized) prediction."""
-    return float(_normalize_answer(ground_truth) in _normalize_answer(prediction))
-
-
-def _f1(prediction: str, ground_truth: str, **_) -> float:
-    pred_tokens = _normalize_answer(prediction).split()
-    gold_tokens = _normalize_answer(ground_truth).split()
-    if not pred_tokens or not gold_tokens:
-        return 0.0
-    common = Counter(pred_tokens) & Counter(gold_tokens)
-    num_same = sum(common.values())
-    if num_same == 0:
-        return 0.0
-    precision = num_same / len(pred_tokens)
-    recall = num_same / len(gold_tokens)
-    return 2 * precision * recall / (precision + recall)
-
-
-def _rouge_l(prediction: str, ground_truth: str, **_) -> float:
-    if not prediction.strip() or not ground_truth.strip():
-        return 0.0
-    try:
-        return Rouge().get_scores([prediction], [ground_truth], avg=True)["rouge-l"]["f"]
-    except Exception:
-        return 0.0
-
-
-def _choice_match(prediction: str, ground_truth: str, options=None, **_) -> float:
-    """For multiple-choice: pick the option with the highest substring overlap with prediction."""
-    if not options:
-        return _exact_match(prediction, ground_truth)
-    pred_norm = _normalize_answer(prediction)
-    gold_norm = _normalize_answer(ground_truth)
-    best_opt, best_score = None, -1
-    for opt in options:
-        score = sum(1 for tok in _normalize_answer(opt).split() if tok in pred_norm)
-        if score > best_score:
-            best_score, best_opt = score, opt
-    return float(_normalize_answer(best_opt or "") == gold_norm)
-
-
-# ---------- Task → metric mapping ----------
-# Categories per SCBench §3.1; approximate scorers, see file docstring.
-
-TASK_TO_METRIC = {
-    # String retrieval (exact / substring)
-    "scbench_kv": _substring_match,
-    "scbench_prefix_suffix": _substring_match,
-    "scbench_vt": _exact_match,
-    # Semantic retrieval (F1 / ROUGE)
-    "scbench_repoqa": _rouge_l,  # TODO: upstream uses function-level match; port verbatim
-    "scbench_qa_eng": _f1,
-    "scbench_qa_chn": _f1,  # TODO: use jieba tokenization for Chinese (see longbench/qa_f1_zh_score)
-    "scbench_choice_eng": _choice_match,
-    # Global processing
-    "scbench_many_shot": _exact_match,
-    "scbench_mf": _exact_match,
-    "scbench_summary": _rouge_l,
-    # Multi-tasking (composite — TODO: port upstream composite scorers)
-    "scbench_summary_with_needles": _rouge_l,
-    "scbench_repoqa_and_kv": _rouge_l,
+Multiturnbench_to_Infinitebench = {
+    "scbench_choice_eng": "longbook_choice_eng",
+    "scbench_qa_eng": "longdialogue_qa_eng",
+    "scbench_qa_chn": "longbook_qa_chn",
+    "scbench_kv": "kv_retrieval",
+    "scbench_kv_hard": "kv_retrieval",
+    "scbench_hashhop": "kv_retrieval",
+    "scbench_prefix_suffix": "kv_retrieval",
+    "scbench_mf": "math_find",
+    "scbench_passkey": "passkey",
 }
 
 
-# ---------- Public API ----------
+def normalize_answer(s: str) -> str:
+    def remove_articles(text: str) -> str:
+        return re.sub(r"\b(a|an|the)\b", " ", text)
 
-def _score_row(task: str, prediction: str, answers, options=None) -> float:
-    metric = TASK_TO_METRIC.get(task)
-    if metric is None:
-        raise ValueError(f"Unknown SCBench task: {task}")
-    # `answers` is a list of acceptable references (at minimum a single-item list).
-    if isinstance(answers, str):
-        answers = [answers]
-    return max(metric(prediction, gt, options=options) for gt in answers)
+    def white_space_fix(text: str) -> str:
+        return " ".join(text.split())
+
+    def remove_punc(text: str) -> str:
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text: str) -> str:
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
 
 
-def calculate_metrics(df) -> dict:
+def normalize_zh_answer(s: str) -> str:
+    def white_space_fix(text: str) -> str:
+        return "".join(text.split())
+
+    def remove_punc(text: str) -> str:
+        cn_punctuation = (
+            "！？｡。＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏."
+        )
+        all_punctuation = set(string.punctuation + cn_punctuation)
+        return "".join(ch for ch in text if ch not in all_punctuation)
+
+    def lower(text: str) -> str:
+        return text.lower()
+
+    return white_space_fix(remove_punc(lower(s)))
+
+
+def string_match_all(pred: str, ref: list | str, model_name: str = "") -> float:
+    if not isinstance(ref, list):
+        ref = [ref]
+    score = sum([1.0 if r.lower() in pred.lower() else 0.0 for r in ref]) / len(ref)
+    return round(score, 2)
+
+
+def f1_score(prediction: list, ground_truth: list) -> tuple[float, float, float]:
+    common = Counter(prediction) & Counter(ground_truth)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0, 0, 0
+    precision = 1.0 * num_same / len(prediction)
+    recall = 1.0 * num_same / len(ground_truth)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1, precision, recall
+
+
+def qa_f1_score(pred: str, ground_truths: list) -> float:
+    f1 = 0.0
+    for ground_truth in ground_truths:
+        normalized_prediction = normalize_answer(pred)
+        normalized_ground_truth = normalize_answer(ground_truth)
+        prediction_tokens = normalized_prediction.split()
+        ground_truth_tokens = normalized_ground_truth.split()
+        scores = f1_score(prediction_tokens, ground_truth_tokens)
+        this_f1, _, _ = scores
+        f1 = max(f1, this_f1)
+    return f1
+
+
+def qa_f1_score_zh(pred: str, ground_truths: list[str]) -> float:
+    f1 = 0.0
+    for ground_truth in ground_truths:
+        norm_pred = normalize_zh_answer(pred)
+        norm_label = normalize_zh_answer(ground_truth)
+        pred_tokens = list(norm_pred)
+        label_tokens = list(norm_label)
+        scores = f1_score(pred_tokens, label_tokens)
+        this_f1, _, _ = scores
+        f1 = max(f1, this_f1)
+    return f1
+
+
+def first_int_match(prediction: str) -> str:
+    pred_list = re.split("[^0-9]", prediction)
+    for item in pred_list:
+        if item != "":
+            return item
+    return ""
+
+
+def get_score_one_kv_retrieval(pred: str, label: str | list, model_name: str = "") -> float:
+    if isinstance(label, list):
+        label = label[0]
+    return 1.0 if label in pred else 0.0
+
+
+def get_score_one_passkey(pred: str, label: str | list, model_name: str = "") -> float:
+    if isinstance(label, list):
+        label = label[0]
+    return 1.0 if label == first_int_match(pred) else 0.0
+
+
+def get_score_one_number_string(pred: str, label: str | list, model_name: str = "") -> float:
+    if isinstance(label, list):
+        label = label[0]
+    return 1.0 if label == first_int_match(pred) else 0.0
+
+
+def get_score_one_math_find(pred: str, label: str | list | int | float, model_name: str = "") -> float:
+    if isinstance(label, list):
+        label = label[0]
+    if isinstance(label, int):
+        first_num = re.search(r"\d+\.\d+|\d+", pred)
+        if first_num is None:
+            return 0.0
+        return 1.0 if int(float(first_num.group(0).strip())) == label else 0.0
+    if isinstance(label, float):
+        first_float = re.search(r"\d+\.\d+|\d+", pred)
+        if first_float is None:
+            return 0.0
+        return 1.0 if float(first_float.group(0).strip()) == label else 0.0
+    raise TypeError(f"Expected int or float label, got {type(label)}")
+
+
+def get_score_one_longdialogue_qa_eng(pred: str, label: list | str, model_name: str = "") -> float:
+    pred = pred.strip().upper()
+    if not isinstance(label, list):
+        label = [label]
+    for item in label:
+        if item.upper() in pred:
+            return 1.0
+    return 0.0
+
+
+def get_score_one_longbook_choice_eng(pred: str, label: list | str, model_name: str = "") -> float:
+    pred = pred.strip()
+    if pred == "":
+        return 0.0
+    if not isinstance(label, list):
+        label = [label]
+    if pred[0] in "ABCD":
+        return 1.0 if pred[0] in label else 0.0
+    if pred in label:
+        return 1.0
+    for c in ["\n", '"', "'", ".", ",", "?", "!", "{", "}"]:
+        pred = pred.replace(c, " ")
+    while "  " in pred:
+        pred = pred.replace("  ", " ")
+    ans_prefixes = ["answer is:", "answer:", "answer is", "option is"]
+    for prefix in ans_prefixes:
+        idx = pred.find(prefix)
+        if idx == -1:
+            continue
+        if len(pred) < idx + len(prefix) + 1:
+            continue
+        after_prefix = pred[idx + len(prefix) + 1 :]
+        for s in label:
+            if after_prefix.startswith(s):
+                return 1.0
+    for word in pred.split():
+        if word in "ABCD":
+            return 1.0 if word in label else 0.0
+    return 0.0
+
+
+def get_score_one_longbook_qa_eng(pred: str, label: list, model_name: str = "") -> float:
+    return qa_f1_score(pred, label)
+
+
+def get_score_one_longbook_qa_chn(pred: str, label: list, model_name: str = "") -> float:
+    return qa_f1_score_zh(pred, label)
+
+
+def get_score_one_repoqa_proxy(pred: str, label: Any, model_name: str = "") -> float:
+    """Lightweight substitute for RepoQA tree-sitter scoring (substring check)."""
+    if isinstance(label, list):
+        label = label[0]
+    needle = str(label).strip()
+    return 1.0 if needle and needle in pred else 0.0
+
+
+def get_score_one_longbook_sum_eng(pred: str, label: str, model_name: str = "") -> float:
+    if not pred.strip() or not str(label).strip():
+        return 0.0
+    try:
+        from rouge import Rouge
+
+        scores = Rouge().get_scores(pred, label)
+        return float(scores[0]["rouge-l"]["f"])
+    except ImportError:
+        return 1.0 if pred.strip() == str(label).strip() else 0.0
+
+
+def get_score_one(pred: str, label: Any, task_name: str, model_name: str = "") -> float:
+    NAME_TO_SCORE_GETTER = {
+        "kv_retrieval": get_score_one_kv_retrieval,
+        "kv_retrieval_prefix": get_score_one_kv_retrieval,
+        "kv_retrieval_both": get_score_one_kv_retrieval,
+        "passkey": get_score_one_passkey,
+        "number_string": get_score_one_number_string,
+        "longdialogue_qa_eng": get_score_one_longdialogue_qa_eng,
+        "longbook_qa_eng": get_score_one_longbook_qa_eng,
+        "longbook_sum_eng": get_score_one_longbook_sum_eng,
+        "longbook_choice_eng": get_score_one_longbook_choice_eng,
+        "longbook_qa_chn": get_score_one_longbook_qa_chn,
+        "math_find": get_score_one_math_find,
+        "scbench_summary": get_score_one_longbook_sum_eng,
+        "scbench_vt": string_match_all,
+        "scbench_many_shot": get_score_one_longdialogue_qa_eng,
+        "scbench_kv_compressible": get_score_one_kv_retrieval,
+        "scbench_repoqa": get_score_one_repoqa_proxy,
+    }
+    if task_name not in NAME_TO_SCORE_GETTER:
+        raise KeyError(f"Unknown SCBench metric task: {task_name}")
+    score = NAME_TO_SCORE_GETTER[task_name](pred, label, model_name)
+    return float(score)
+
+
+def calculate_metrics(df: pd.DataFrame, data_name: str, model_name: str = "") -> dict[str, Any]:
     """
-    Compute per-task (and optionally per-turn) accuracy on a SCBench results frame.
+    Aggregate scores for SCBench rows (one row per turn).
 
-    Expected columns:
-        - `predicted_answer`: model output (string)
-        - `answers`: list[str] of acceptable references
-        - `task`: one of the 12 `scbench_*` task names
-        - `options` (optional): list[str] for multiple-choice tasks
-        - `turn_index` (optional): int — if present, emit per-turn breakdowns
+    Expected columns: ``prediction`` (or ``pred``), ``ground_truth`` (or ``label``), optional ``task``.
     """
-    results: dict = {}
+    pred_key = "prediction" if "prediction" in df.columns else "pred"
+    label_key = "ground_truth" if "ground_truth" in df.columns else "label"
 
-    # Per-task aggregate
-    for task, group in df.groupby("task"):
-        scores = [
-            _score_row(
-                task,
-                row["predicted_answer"] or "",
-                row["answers"],
-                options=row.get("options") if "options" in row else None,
-            )
-            for _, row in group.iterrows()
-        ]
-        results[task] = round(100 * float(np.mean(scores)), 2)
+    if data_name in Multiturnbench_to_Infinitebench:
+        task_name = Multiturnbench_to_Infinitebench[data_name]
+    else:
+        task_name = data_name
 
-        # Per-turn breakdown (only if turn_index is provided, SCBench-style reporting)
-        if "turn_index" in group.columns:
-            per_turn = {}
-            for turn_idx, turn_group in group.groupby("turn_index"):
-                turn_scores = [
-                    _score_row(
-                        task,
-                        row["predicted_answer"] or "",
-                        row["answers"],
-                        options=row.get("options") if "options" in row else None,
-                    )
-                    for _, row in turn_group.iterrows()
-                ]
-                per_turn[f"turn_{int(turn_idx)}"] = round(100 * float(np.mean(turn_scores)), 2)
-            results[f"{task}__per_turn"] = per_turn
+    scores: list[float] = []
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="scoring"):
+        pred = str(row[pred_key])
+        label = row[label_key]
+        if "task" in df.columns and pd.notna(row.get("task")):
+            tname = str(row["task"])
+            if tname in Multiturnbench_to_Infinitebench:
+                tname = Multiturnbench_to_Infinitebench[tname]
+        else:
+            tname = task_name
+        scores.append(get_score_one(pred, label, tname, model_name))
 
-    # Overall (averaged over all rows, not over tasks — matches SCBench overall avg)
-    if len(df) > 0:
-        overall_scores = [
-            _score_row(
-                row["task"],
-                row["predicted_answer"] or "",
-                row["answers"],
-                options=row.get("options") if "options" in row else None,
-            )
-            for _, row in df.iterrows()
-        ]
-        results["overall"] = round(100 * float(np.mean(overall_scores)), 2)
-
-    return results
+    mean_score = sum(scores) / len(scores) if scores else 0.0
+    return {
+        "data_name": data_name,
+        "task_metric": task_name,
+        "mean_score": mean_score,
+        "num_rows": len(scores),
+    }
