@@ -44,6 +44,13 @@ from kvpress.presses.streaming_llm_press import StreamingLLMPress
 from kvpress.presses.think_press import ThinKPress
 from kvpress.presses.tova_press import TOVAPress
 
+# TurnKV Week-1 turn-aware primitives (ADR 001 §3-4, ADR 002 §2).
+from kvpress.presses.loyalty_press import LoyaltyPress
+from kvpress.presses.role_boundary_anchor_press import RoleBoundaryAnchorPress
+from kvpress.presses.turn_aware_base import TurnAwareMixin, TurnBoundary
+from kvpress.presses.turn_aware_global_press import TurnAwareGlobalPress
+from kvpress.presses.turn_floor_press import TurnFloorPress
+
 # Patch the attention functions to support head-wise compression
 patch_attention_functions()
 
@@ -89,4 +96,11 @@ __all__ = [
     "DMSPress",
     "FastKVzipPress",
     "KVComposePress",
+    # TurnKV Week-1 primitives
+    "TurnBoundary",
+    "TurnAwareMixin",
+    "TurnFloorPress",
+    "RoleBoundaryAnchorPress",
+    "LoyaltyPress",
+    "TurnAwareGlobalPress",
 ]

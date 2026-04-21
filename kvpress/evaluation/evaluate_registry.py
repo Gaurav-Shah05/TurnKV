@@ -36,14 +36,18 @@ from kvpress import (
     KVzapPress,
     KVzipPress,
     LagKVPress,
+    LoyaltyPress,
     ObservedAttentionPress,
     PyramidKVPress,
     QFilterPress,
     RandomPress,
+    RoleBoundaryAnchorPress,
     SnapKVPress,
     StreamingLLMPress,
     ThinKPress,
     TOVAPress,
+    TurnAwareGlobalPress,
+    TurnFloorPress,
 )
 
 # These dictionaries define the available datasets, scorers, and KVPress methods for evaluation.
@@ -140,3 +144,47 @@ PRESS_REGISTRY = {
     "decoding_adakv_snapkv": DecodingPress(base_press=AdaKVPress(SnapKVPress())),
     "decoding_keydiff": DecodingPress(base_press=KeyDiffPress()),
 }
+
+
+def _turnkv_composite(base_press, budget: int, alpha: float) -> TurnAwareGlobalPress:
+    """Factory for turnkv_*/baseline_* registry entries (ADR 002 §2 row for
+    ``evaluate_registry.py``). ``alpha=1.0`` -> turn-aware variant; ``alpha=0.0``
+    -> bit-equivalent-to-base short-circuit. ``budget`` is a placeholder for
+    the CLI entry point; the multi-turn harness (Week 2) will override it
+    per benchmark (ADR 001 §2 ``global_budget`` table).
+    """
+    return TurnAwareGlobalPress(
+        base_press=base_press,
+        global_budget=budget,
+        policies={
+            "floor": TurnFloorPress(global_budget=budget),
+            "anchor": RoleBoundaryAnchorPress(),
+            "loyalty": LoyaltyPress(),
+        },
+        alphas={"floor": alpha, "anchor": alpha, "loyalty": alpha},
+    )
+
+
+# TurnKV Week-1 registry entries (ADR 002 §2). Each entry constructs a
+# fresh base press so ``compression_ratio`` mutation on one variant cannot
+# leak into another (standard registry-wide convention). ADR 002 §2 lists
+# ``turnkv_adakv_snapkv`` in the Week-1 slate; the composer's
+# ``ScorerPress``-only ``__post_init__`` guard (see
+# ``turn_aware_global_press.py``) defers AdaKV to Week 2, so only the three
+# plain-ScorerPress bases ship here.
+_TURNKV_BUDGET_PLACEHOLDER = 4096
+_TURNKV_BASE_FACTORIES = {
+    "snapkv": SnapKVPress,
+    "streaming_llm": StreamingLLMPress,
+    "expected_attention": ExpectedAttentionPress,
+    # TODO(Week 2): "adakv_snapkv": lambda: AdaKVPress(SnapKVPress()) once the
+    # composer supports per-head masking.
+}
+for _name, _factory in _TURNKV_BASE_FACTORIES.items():
+    PRESS_REGISTRY[f"turnkv_{_name}"] = _turnkv_composite(
+        _factory(), _TURNKV_BUDGET_PLACEHOLDER, alpha=1.0
+    )
+    PRESS_REGISTRY[f"baseline_{_name}"] = _turnkv_composite(
+        _factory(), _TURNKV_BUDGET_PLACEHOLDER, alpha=0.0
+    )
+del _name, _factory  # avoid leaking loop vars into the module namespace
