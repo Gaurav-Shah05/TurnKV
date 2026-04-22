@@ -34,7 +34,7 @@ eval = [
     "pyyaml>=6.0.1,<7",
 ]
 modal = [
-    "modal>=0.64.0,<1",
+    "modal>=1.4.0,<2",
 ]
 flash-attn = [
     "flash-attn"

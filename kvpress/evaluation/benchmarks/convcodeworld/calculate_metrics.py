@@ -18,10 +18,8 @@ the multi-turn harness — see README for the pipeline):
     predicted_answer  : str    model's code output after compressing + attending to
                                the trajectory up to this iteration
     reference_code    : str    the dataset's ground-truth code at this iteration
-    label             : bool   does predicted_answer pass the unit tests (True/False)?
-                               For the MVP we trust the dataset's label directly; a
-                               later pass can re-execute the generated code for a
-                               true per-prediction label.
+    label             : bool   static replay label from the dataset, or
+    passed            : bool   live-loop execution result for generated code.
 """
 
 from collections import defaultdict
@@ -54,7 +52,21 @@ def calculate_metrics(df) -> dict:
     if len(df) == 0:
         return {"overall": 0.0}
 
-    labels = [bool(x) for x in df["label"].tolist()]
+    raw_df = df
+    if "metric_excluded" in df.columns:
+        df = df[~df["metric_excluded"].fillna(False)]
+    elif "status" in df.columns:
+        df = df[df["status"] != "skipped_after_pass"]
+    if len(df) == 0:
+        results = {"overall": 0.0}
+        if "status" in raw_df.columns:
+            results["status_counts"] = {
+                str(k): int(v) for k, v in raw_df["status"].value_counts(dropna=False).sort_index().items()
+            }
+        return results
+
+    label_col = "passed" if "passed" in df.columns else "label"
+    labels = [bool(x) for x in df[label_col].tolist()]
     results: dict = {"overall": round(100 * float(np.mean(labels)), 2)}
 
     # Per feedback configuration
@@ -72,6 +84,26 @@ def calculate_metrics(df) -> dict:
             by_iter[int(it)].append(lbl)
         results["per_iteration"] = {
             f"iter_{it}": round(100 * float(np.mean(v)), 2) for it, v in sorted(by_iter.items())
+        }
+
+    if "session_id" in df.columns and "iteration" in df.columns:
+        mrr_values = []
+        recall_values = []
+        final_values = []
+        for _, group in df.sort_values("iteration").groupby("session_id"):
+            group_labels = [bool(x) for x in group[label_col].tolist()]
+            recall_values.append(any(group_labels))
+            first_pass_rank = next((i + 1 for i, passed in enumerate(group_labels) if passed), None)
+            mrr_values.append(0.0 if first_pass_rank is None else 1.0 / first_pass_rank)
+            final_values.append(group_labels[-1])
+        if mrr_values:
+            results["mrr"] = round(100 * float(np.mean(mrr_values)), 2)
+            results["recall"] = round(100 * float(np.mean(recall_values)), 2)
+            results["final_pass_rate"] = round(100 * float(np.mean(final_values)), 2)
+
+    if "status" in raw_df.columns:
+        results["status_counts"] = {
+            str(k): int(v) for k, v in raw_df["status"].value_counts(dropna=False).sort_index().items()
         }
 
     # Code similarity (optional secondary signal)

@@ -99,6 +99,33 @@ python evaluate.py \
 
 `--data_dir` selects one of the five feedback configurations. `--compression_ratio 0.875` corresponds to the 1/8 keep-rate (7/8 evicted).
 
+### Live-loop runner
+
+The opt-in live-loop path generates code, executes that generated code, builds deterministic compilation/execution/verbal feedback, and feeds that feedback into the next turn while carrying the KV cache forward:
+
+```bash
+cd kvpress/evaluation
+python benchmarks/convcodeworld/live_loop.py \
+    --press_name=snapkv \
+    --compression_ratio=0.5 \
+    --model=meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --feedback_config=CF_EF_UNIT_SNF \
+    --num_eval_examples=10
+```
+
+For Modal:
+
+```bash
+cd kvpress
+modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
+    --press-names snapkv,streaming_llm,expected_attention \
+    --num-eval-examples 10
+```
+
+This is intentionally separate from the static ConvCodeBench replay protocol above because live-loop feedback changes later turns based on each generated solution.
+Live-loop runs default to `--cot=True`, use the loaded Llama model as the verbal-feedback simulator, and early-stop once generated code passes the available tests.
+See `MODAL_SETUP.md` for the full Modal setup runbook.
+
 ## TODOs before headline-quality numbers
 
 1. **Confirm the dataset license**. The HF card does not list one as of 2026-04-19. Either ping the authors or fall back to running their public GitHub pipeline locally.

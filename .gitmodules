@@ -1,0 +1,3 @@
+[submodule "convcodeworld"]
+	path = convcodeworld
+	url = https://github.com/stovecat/convcodeworld.git

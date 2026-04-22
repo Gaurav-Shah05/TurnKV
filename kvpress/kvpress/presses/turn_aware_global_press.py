@@ -74,6 +74,7 @@ class TurnAwareGlobalPress(BasePress):
 
     _last_hidden_states: dict = field(default_factory=dict, init=False, repr=False)
     _last_kwargs: dict = field(default_factory=dict, init=False, repr=False)
+    _suspend_hooks: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
         assert isinstance(self.base_press, ScorerPress), (
@@ -106,6 +107,9 @@ class TurnAwareGlobalPress(BasePress):
         """Buffer per-layer state, drive ``update_loyalty`` on all policies,
         never write to the cache. Eviction only in :meth:`run_global_compression`.
         """
+        if self._suspend_hooks:
+            return output
+
         hidden_states = kwargs.get("hidden_states")
         cache = kwargs.get("past_key_values")
         if hidden_states is None or cache is None:
@@ -114,11 +118,16 @@ class TurnAwareGlobalPress(BasePress):
         layer_idx = module.layer_idx
         # detach().clone() matches DecodingPress (decoding_press.py:133) so a
         # later forward pass cannot rewrite our buffered tensor in place.
-        self._last_hidden_states[layer_idx] = hidden_states.detach().clone()
-        # Shallow-copy the kwargs dict; inner tensors (position_embeddings)
-        # are refreshed per forward pass, and at compression time we slice
-        # cos/sin by q_len -- fine under Week-1 prefill-only compression.
-        self._last_kwargs[layer_idx] = dict(kwargs)
+        # Keep the latest multi-token prefill/query state. Single-token decode
+        # forwards are still useful for loyalty updates below, but they are too
+        # short for scorer presses such as SnapKV that need an observation
+        # window during turn-boundary compression.
+        if hidden_states.shape[1] > 1 or layer_idx not in self._last_hidden_states:
+            self._last_hidden_states[layer_idx] = hidden_states.detach().clone()
+            # Shallow-copy the kwargs dict; inner tensors (position_embeddings)
+            # are refreshed per forward pass, and at compression time we slice
+            # cos/sin by q_len -- fine under Week-1 prefill-only compression.
+            self._last_kwargs[layer_idx] = dict(kwargs)
 
         # All-alphas-zero: no policy weight contributes, so skip loyalty
         # accumulation -- matches baseline_* behaviour from ADR 002 §2.
@@ -274,6 +283,21 @@ class TurnAwareGlobalPress(BasePress):
         self._last_kwargs.clear()
         for policy in self.policies.values():
             policy.reset_turn_state()
+
+    @contextmanager
+    def suspend_hooks(self) -> Generator:
+        """Temporarily ignore forwards from sidecar model calls.
+
+        Live-loop benchmarks use the same model to simulate verbal feedback
+        outside the measured conversation cache. Those forwards must not
+        refresh scorer buffers or loyalty state.
+        """
+        old = self._suspend_hooks
+        self._suspend_hooks = True
+        try:
+            yield
+        finally:
+            self._suspend_hooks = old
 
     @contextmanager
     def __call__(self, model: PreTrainedModel) -> Generator:
