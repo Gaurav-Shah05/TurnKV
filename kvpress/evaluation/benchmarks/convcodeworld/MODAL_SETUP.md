@@ -57,8 +57,18 @@ cd kvpress
 modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
     --press-names snapkv,streaming_llm,expected_attention \
     --compression-ratio 0.5 \
+    --snapkv-window-size 64 \
+    --snapkv-kernel-size 5 \
+    --streaming-llm-n-sink 4 \
+    --expected-attention-n-future-positions 512 \
+    --expected-attention-n-sink 4 \
+    --expected-attention-use-covariance \
+    --expected-attention-use-vnorm \
+    --expected-attention-epsilon 0.01 \
     --feedback-config CF_EF_UNIT_SNF \
-    --num-eval-examples 10
+    --fraction 0.1 \
+    --num-eval-examples -1 \
+    --local-budget 4096
 ```
 
 Defaults:
@@ -72,6 +82,25 @@ Defaults:
 | `global_budget` | `4500` |
 | `local_budget` | `4096` |
 | verbal simulator | same loaded Llama model, separate fresh KV cache |
+
+Press hyperparameters exposed by the top-level Modal command:
+
+| Press | Flags |
+|---|---|
+| all scorer presses | `--compression-ratio` |
+| ThinK/composed ThinK | `--key-channel-compression-ratio` |
+| DMS | `--threshold` |
+| SnapKV/PyramidKV | `--snapkv-window-size`, `--snapkv-kernel-size` |
+| StreamingLLM | `--streaming-llm-n-sink` |
+| ExpectedAttention | `--expected-attention-n-future-positions`, `--expected-attention-n-sink`, `--expected-attention-use-covariance`, `--no-expected-attention-use-covariance`, `--expected-attention-use-vnorm`, `--no-expected-attention-use-vnorm`, `--expected-attention-epsilon` |
+| TurnAwareGlobalPress | `--alpha-floor`, `--alpha-anchor`, `--alpha-loyalty` |
+| RoleBoundaryAnchorPress | `--anchor-beta` |
+| TurnFloorPress | `--floor-gamma`, `--alpha-floor-len`, `--min-floor-tokens` |
+| LoyaltyPress | `--loyalty-top-p` |
+| answer-suffix decode press | `--decode-compression-interval`, `--decode-hidden-states-buffer-size` |
+
+`--local-budget` is also exposed by the top-level Modal command and controls
+the answer-suffix decode compression target.
 
 ## Pull Results Back
 

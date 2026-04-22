@@ -119,11 +119,21 @@ For Modal:
 cd kvpress
 modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
     --press-names snapkv,streaming_llm,expected_attention \
+    --compression-ratio 0.5 \
+    --snapkv-window-size 64 \
+    --snapkv-kernel-size 5 \
+    --streaming-llm-n-sink 4 \
+    --expected-attention-n-future-positions 512 \
+    --expected-attention-n-sink 4 \
+    --expected-attention-epsilon 0.01 \
+    --local-budget 4096 \
     --num-eval-examples 10
 ```
 
 This is intentionally separate from the static ConvCodeBench replay protocol above because live-loop feedback changes later turns based on each generated solution.
-Live-loop runs default to `--cot=True`, use the loaded Llama model as the verbal-feedback simulator, and early-stop once generated code passes the available tests.
+Live-loop runs default to `--cot=True`, use the loaded Llama model as the verbal-feedback simulator, early-stop once generated code passes the available tests, and expose the base-press knobs through the top-level Modal command.
+Turn-aware runs can use registry names such as `turnkv_snapkv` or pass
+`--alpha-floor`, `--alpha-anchor`, and `--alpha-loyalty` with a base press.
 See `MODAL_SETUP.md` for the full Modal setup runbook.
 
 ## TODOs before headline-quality numbers

@@ -12,7 +12,7 @@ import os
 import random
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -35,8 +35,12 @@ from kvpress import (  # noqa: E402
     ComposedPress,
     DMSPress,
     DuoAttentionPress,
+    ExpectedAttentionPress,
+    LoyaltyPress,
+    RoleBoundaryAnchorPress,
     ScorerPress,
     ThinKPress,
+    TurnFloorPress,
     TurnAwareGlobalPress,
 )
 from kvpress.presses.answer_suffix_decoding_press import AnswerSuffixDecodingPress  # noqa: E402
@@ -64,6 +68,22 @@ class ConvCodeWorldLiveConfig:
     compression_ratio: float = 0.5
     key_channel_compression_ratio: Optional[float] = None
     threshold: Optional[float] = None
+    snapkv_window_size: Optional[int] = None
+    snapkv_kernel_size: Optional[int] = None
+    streaming_llm_n_sink: Optional[int] = None
+    expected_attention_n_future_positions: Optional[int] = None
+    expected_attention_n_sink: Optional[int] = None
+    expected_attention_use_covariance: Optional[bool] = None
+    expected_attention_use_vnorm: Optional[bool] = None
+    expected_attention_epsilon: Optional[float] = None
+    alpha_floor: Optional[float] = None
+    alpha_anchor: Optional[float] = None
+    alpha_loyalty: Optional[float] = None
+    anchor_beta: Optional[float] = None
+    floor_gamma: Optional[float] = None
+    loyalty_top_p: Optional[float] = None
+    alpha_floor_len: Optional[float] = None
+    min_floor_tokens: Optional[int] = None
     feedback_config: str = "CF_EF_UNIT_SNF"
     auto_feedback_options: bool = True
     include_compilation_feedback: bool = True
@@ -143,13 +163,184 @@ def _apply_feedback_config(cfg: ConvCodeWorldLiveConfig) -> None:
         cfg.user_expertise = "novice"
 
 
+def _iter_press_components(press: BasePress | None) -> Iterable[BasePress]:
+    seen: set[int] = set()
+    stack: list[Any] = [press]
+    while stack:
+        component = stack.pop()
+        if component is None or id(component) in seen:
+            continue
+        seen.add(id(component))
+        yield component
+        for attr in ("base_press", "press"):
+            child = getattr(component, attr, None)
+            if child is not None:
+                stack.append(child)
+        children = getattr(component, "presses", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+
+
+def _has_dataclass_field(obj: Any, name: str) -> bool:
+    if not is_dataclass(obj):
+        return False
+    return any(field.name == name for field in fields(obj))
+
+
+def _set_press_field(press: BasePress, field_name: str, value: Any, *, class_names: set[str]) -> None:
+    if value is None:
+        return
+    for component in _iter_press_components(press):
+        if component.__class__.__name__ not in class_names:
+            continue
+        if _has_dataclass_field(component, field_name):
+            setattr(component, field_name, value)
+
+
+def _apply_press_hyperparameters(press: BasePress, cfg: ConvCodeWorldLiveConfig) -> None:
+    _set_press_field(
+        press,
+        "window_size",
+        cfg.snapkv_window_size,
+        class_names={"SnapKVPress", "PyramidKVPress"},
+    )
+    _set_press_field(
+        press,
+        "kernel_size",
+        cfg.snapkv_kernel_size,
+        class_names={"SnapKVPress", "PyramidKVPress"},
+    )
+    _set_press_field(
+        press,
+        "n_sink",
+        cfg.streaming_llm_n_sink,
+        class_names={"StreamingLLMPress"},
+    )
+    _set_press_field(
+        press,
+        "n_future_positions",
+        cfg.expected_attention_n_future_positions,
+        class_names={"ExpectedAttentionPress"},
+    )
+    _set_press_field(
+        press,
+        "n_sink",
+        cfg.expected_attention_n_sink,
+        class_names={"ExpectedAttentionPress"},
+    )
+    _set_press_field(
+        press,
+        "use_covariance",
+        cfg.expected_attention_use_covariance,
+        class_names={"ExpectedAttentionPress"},
+    )
+    _set_press_field(
+        press,
+        "use_vnorm",
+        cfg.expected_attention_use_vnorm,
+        class_names={"ExpectedAttentionPress"},
+    )
+    _set_press_field(
+        press,
+        "epsilon",
+        cfg.expected_attention_epsilon,
+        class_names={"ExpectedAttentionPress"},
+    )
+
+
+def _has_turn_aware_overrides(cfg: ConvCodeWorldLiveConfig) -> bool:
+    return any(
+        getattr(cfg, name) is not None
+        for name in (
+            "alpha_floor",
+            "alpha_anchor",
+            "alpha_loyalty",
+            "anchor_beta",
+            "floor_gamma",
+            "loyalty_top_p",
+            "alpha_floor_len",
+            "min_floor_tokens",
+        )
+    )
+
+
+def _policy_requested(cfg: ConvCodeWorldLiveConfig, name: str) -> bool:
+    names = {
+        "floor": ("alpha_floor", "floor_gamma", "alpha_floor_len", "min_floor_tokens"),
+        "anchor": ("alpha_anchor", "anchor_beta"),
+        "loyalty": ("alpha_loyalty", "loyalty_top_p"),
+    }[name]
+    return any(getattr(cfg, field_name) is not None for field_name in names)
+
+
+def _validate_turn_aware_overrides(cfg: ConvCodeWorldLiveConfig) -> None:
+    if cfg.anchor_beta is not None and not 0 <= cfg.anchor_beta <= 1:
+        raise ValueError(f"anchor_beta must be in [0, 1], got {cfg.anchor_beta}")
+    if cfg.floor_gamma is not None and not 0 < cfg.floor_gamma <= 1:
+        raise ValueError(f"floor_gamma must be in (0, 1], got {cfg.floor_gamma}")
+    if cfg.loyalty_top_p is not None and not 0 < cfg.loyalty_top_p <= 1:
+        raise ValueError(f"loyalty_top_p must be in (0, 1], got {cfg.loyalty_top_p}")
+    if cfg.alpha_floor_len is not None and cfg.alpha_floor_len < 0:
+        raise ValueError(f"alpha_floor_len must be non-negative, got {cfg.alpha_floor_len}")
+    if cfg.min_floor_tokens is not None and cfg.min_floor_tokens < 0:
+        raise ValueError(f"min_floor_tokens must be non-negative, got {cfg.min_floor_tokens}")
+
+
+def _configure_turn_aware_press(
+    press: TurnAwareGlobalPress,
+    cfg: ConvCodeWorldLiveConfig,
+    *,
+    create_missing: bool = False,
+) -> None:
+    _validate_turn_aware_overrides(cfg)
+    press.global_budget = cfg.global_budget
+
+    if create_missing and _policy_requested(cfg, "floor") and "floor" not in press.policies:
+        press.policies["floor"] = TurnFloorPress(global_budget=cfg.global_budget)
+        press.alphas.setdefault("floor", 0.0)
+    if create_missing and _policy_requested(cfg, "anchor") and "anchor" not in press.policies:
+        press.policies["anchor"] = RoleBoundaryAnchorPress()
+        press.alphas.setdefault("anchor", 0.0)
+    if create_missing and _policy_requested(cfg, "loyalty") and "loyalty" not in press.policies:
+        press.policies["loyalty"] = LoyaltyPress()
+        press.alphas.setdefault("loyalty", 0.0)
+
+    if cfg.alpha_floor is not None:
+        press.alphas["floor"] = cfg.alpha_floor
+    if cfg.alpha_anchor is not None:
+        press.alphas["anchor"] = cfg.alpha_anchor
+    if cfg.alpha_loyalty is not None:
+        press.alphas["loyalty"] = cfg.alpha_loyalty
+
+    floor = press.policies.get("floor")
+    if isinstance(floor, TurnFloorPress):
+        floor.global_budget = cfg.global_budget
+        if cfg.floor_gamma is not None:
+            floor.gamma = cfg.floor_gamma
+        if cfg.alpha_floor_len is not None:
+            floor.alpha_floor_len = cfg.alpha_floor_len
+        if cfg.min_floor_tokens is not None:
+            floor.min_floor_tokens = cfg.min_floor_tokens
+
+    anchor = press.policies.get("anchor")
+    if isinstance(anchor, RoleBoundaryAnchorPress) and cfg.anchor_beta is not None:
+        anchor.beta = cfg.anchor_beta
+
+    loyalty = press.policies.get("loyalty")
+    if isinstance(loyalty, LoyaltyPress) and cfg.loyalty_top_p is not None:
+        loyalty.top_p = cfg.loyalty_top_p
+
+
 def _setup_press(cfg: ConvCodeWorldLiveConfig) -> BasePress | None:
     if cfg.press_name == "no_press":
         return None
     if cfg.press_name not in PRESS_REGISTRY:
         raise ValueError(f"Unknown press_name '{cfg.press_name}'. See PRESS_REGISTRY in evaluate_registry.py.")
 
-    press = copy.deepcopy(PRESS_REGISTRY[cfg.press_name])
+    if cfg.press_name == "expected_attention":
+        press = ExpectedAttentionPress(epsilon=1e-2)
+    else:
+        press = copy.deepcopy(PRESS_REGISTRY[cfg.press_name])
     if press is None:
         return None
 
@@ -159,6 +350,9 @@ def _setup_press(cfg: ConvCodeWorldLiveConfig) -> BasePress | None:
         if cfg.threshold is None:
             raise ValueError("threshold must be set for DMSPress")
         press.threshold = cfg.threshold
+    elif isinstance(press, TurnAwareGlobalPress):
+        if hasattr(press.base_press, "compression_ratio"):
+            press.base_press.compression_ratio = cfg.compression_ratio
     elif isinstance(press, ComposedPress):
         for child in press.presses:
             if isinstance(child, ThinKPress):
@@ -174,6 +368,7 @@ def _setup_press(cfg: ConvCodeWorldLiveConfig) -> BasePress | None:
     elif hasattr(press, "compression_ratio"):
         press.compression_ratio = cfg.compression_ratio
 
+    _apply_press_hyperparameters(press, cfg)
     return press
 
 
@@ -181,13 +376,13 @@ def _as_global_press(press: BasePress | None, cfg: ConvCodeWorldLiveConfig) -> T
     if press is None:
         return None
     if isinstance(press, TurnAwareGlobalPress):
-        press.global_budget = cfg.global_budget
-        for policy in press.policies.values():
-            if hasattr(policy, "global_budget"):
-                policy.global_budget = cfg.global_budget
+        _configure_turn_aware_press(press, cfg, create_missing=True)
         return press
     if isinstance(press, ScorerPress):
-        return TurnAwareGlobalPress(base_press=press, global_budget=cfg.global_budget, policies={}, alphas={})
+        global_press = TurnAwareGlobalPress(base_press=press, global_budget=cfg.global_budget, policies={}, alphas={})
+        if _has_turn_aware_overrides(cfg):
+            _configure_turn_aware_press(global_press, cfg, create_missing=True)
+        return global_press
     raise TypeError(
         f"ConvCodeWorld live-loop global compression requires a ScorerPress-compatible press, "
         f"got {type(press).__name__}. Use snapkv, streaming_llm, expected_attention, knorm, or no_press."
@@ -222,6 +417,10 @@ def _parse_task_ids(value: str | None) -> set[str] | None:
     return {x.strip() for x in value.split(",") if x.strip()}
 
 
+def _slug_value(value: Any) -> str:
+    return str(value).replace("/", "--").replace(".", "p").replace("-", "m")
+
+
 def _load_tasks(cfg: ConvCodeWorldLiveConfig) -> list[dict[str, Any]]:
     ds = _load_dataset_split(cfg.dataset_name, cfg.bigcodebench_split)
     rows = [dict(row) for row in ds]
@@ -247,16 +446,33 @@ def _load_tasks(cfg: ConvCodeWorldLiveConfig) -> list[dict[str, Any]]:
 
 
 def _results_dir(cfg: ConvCodeWorldLiveConfig) -> Path:
-    name = "__".join(
-        [
-            "live",
-            cfg.feedback_config,
-            cfg.model.replace("/", "--"),
-            cfg.press_name,
-            f"{cfg.compression_ratio:.2f}",
-            f"n{cfg.num_eval_examples}",
-        ]
-    )
+    parts = [
+        "live",
+        cfg.feedback_config,
+        cfg.model.replace("/", "--"),
+        cfg.press_name,
+        f"{cfg.compression_ratio:.2f}",
+    ]
+    turn_bits = []
+    for attr in (
+        "alpha_floor",
+        "alpha_anchor",
+        "alpha_loyalty",
+        "anchor_beta",
+        "floor_gamma",
+        "loyalty_top_p",
+        "alpha_floor_len",
+        "min_floor_tokens",
+    ):
+        value = getattr(cfg, attr)
+        if value is not None:
+            turn_bits.append(f"{attr}-{_slug_value(value)}")
+    if turn_bits:
+        parts.append("turnaware_" + "_".join(turn_bits))
+    if cfg.fraction < 1.0:
+        parts.append(f"frac{_slug_value(cfg.fraction)}")
+    parts.append(f"n{cfg.num_eval_examples}")
+    name = "__".join(parts)
     out = Path(cfg.output_dir) / name
     if not out.exists():
         out.mkdir(parents=True, exist_ok=True)
@@ -462,7 +678,8 @@ def _simulate_verbal_feedback(model, tokenizer, task: dict[str, Any], code: str,
 def _maybe_global_compress(model, cache: DynamicCache, press: TurnAwareGlobalPress | None, target: int) -> None:
     if press is not None and cache.get_seq_length() > press.global_budget:
         try:
-            press.run_global_compression(model, cache, target=target)
+            with torch.no_grad():
+                press.run_global_compression(model, cache, target=target)
         except AssertionError as exc:
             logger.warning("Skipping global compression because the scorer had insufficient query context: %s", exc)
 
