@@ -10,6 +10,54 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-23 — live_loop.py major expansion, Modal rewrite, flashdecode tracking — @yagneek
+
+Large batch of ConvCodeWorld infrastructure work landed today (all unstaged, branch `liveloop`):
+
+**`live_loop.py` — major expansion (~650 LOC added)**
+- Added `benchmark_mode` field (`live` / `static`, with aliases `live_loop` / `static_replay`). `_normalize_benchmark_mode` validates and normalises the string.
+- Added `full_kv_cache`, `require_flashdecode`, and `error_on_kv_cache_vram_exhaustion` config fields.
+- New VRAM-safety helpers: `infer_device`, `_cache_tensor_devices`, `_assert_cache_on_device`, `_estimate_kv_cache_bytes`, `_assert_kv_cache_fits_available_vram`. These guard against silent OOM when `full_kv_cache=True` keeps the entire KV cache resident.
+- Utility helpers: `_is_flash_attention_3`, `_model_uses_flash_attention_3`, `_text_config`, `_format_num_bytes`.
+- Imports `flashdecode_used_layers` / `reset_flashdecode_tracking` from `attention_patch.py` to verify FA3 decode path is actually active when `require_flashdecode=True`.
+- Default feedback model updated from `gemma-4-E2B-it` → `gemma-3-4b-it` (available without gated access).
+
+**`attention_patch.py` — flashdecode tracking (~180 LOC added)**
+- New module-level tracking: `reset_flashdecode_tracking(model)` clears `_kvpress_flashdecode_used` flags; `flashdecode_used_layers(model)` returns sorted list of layer indices that actually used the FA3 decode path.
+- `_flashdecode_forward` internal helper wires the `flash_attn_with_kvcache` path and sets the flag on the module.
+- Lazy import of `flash_attn_interface.flash_attn_with_kvcache` via `lru_cache` so the module loads cleanly when FA3 is absent.
+
+**`executor.py` — code normalisation helpers (~45 LOC added)**
+- `normalize_tokenizer_artifacts(text)`: translates byte-level BPE artefacts (`Ċ`→`\n`, `Ġ`→` `, `ĉ`→`\t`) that appear when the model emits raw tokenizer vocab tokens instead of decoded text.
+- `_contains_entry_point(code, entry_point)`: regex check for a named function definition.
+- `_longest_compilable_prefix(code, entry_point)`: walks candidate code backwards from the last line to find the longest prefix that (a) compiles and (b) contains the entry-point function. Handles truncated generation gracefully.
+- `normalize_candidate_code` and `normalize_tokenizer_artifacts` exported for use in `live_loop.py`.
+
+**`modal_app.py` — full rewrite (~186 LOC added)**
+- All constants extracted to module level: `DEFAULT_MODEL`, `DEFAULT_FEEDBACK_MODEL`, `CUDA_BASE_IMAGE`, `MODAL_TORCH_VERSION`, `FLASH_ATTN3_REF`, `TRANSFORMERS_GIT_REF`, `MODAL_EVAL_REQUIREMENTS`.
+- FA3 build flags extracted to `FLASH_ATTN3_BUILD_ENV` (disables backward, SM80, split, FP16, FP8 kernels to keep the H100-only wheel small and the Modal layer cacheable).
+- `MODAL_EVAL_REQUIREMENTS` tuple drives `_shell_requirements()` → single `uv pip install` invocation; no more inline string concatenation.
+- `base_image` build chain now explicit and reproducible.
+- Feedback model updated to `gemma-3-4b-it` to match `live_loop.py`.
+
+**`modal_run.sh` — full rewrite**
+- Now a proper bash script (`set -euo pipefail`, `cd` to repo root relative to script location).
+- Targets `run_convcodeworld_live` entrypoint (not `main`).
+- Default run: `no_press` at `compression_ratio=0.0`, `full_kv_cache`, `require_flashdecode`, `error_on_kv_cache_vram_exhaustion` — i.e. a baseline full-cache run to establish upper-bound numbers and verify the FA3 decode path is active.
+- `--fraction 0.05` + `--num-eval-examples -1` for a quick smoke sweep.
+- Runs detached (`-d`) with `MODAL_HF_SECRET_NAME=hf-secret`.
+
+**`MODAL_HYPERPARAMS.md` — new file**
+- Complete reference table for every CLI flag exposed by `modal_app.py::main`, grouped by: dispatch, model/runtime, benchmark sampling, generation/budget, base-press, turn-aware, and Modal infrastructure constants.
+- Documents `modal_run.sh` preset args.
+
+Open questions from today:
+- `gemma-3-4b-it` vs `gemma-4-E2B-it` for verbal feedback: the 3B is ungated but weaker; need to measure feedback quality difference on a 20-task sample before committing to it for headline runs.
+- `_longest_compilable_prefix` falls back to the raw string if nothing compiles — need a test that exercises the entry-point guard on a truncated generation.
+- `require_flashdecode` check fires after generation; if FA3 silently falls back mid-run we only find out at the end. Consider checking after the first decode step instead.
+
+---
+
 ## 2026-04-19 — final benchmark lineup, "context permanent" assumption, Mode 2 / Y1 setups — @gaurav
 
 Several discussions locked down:

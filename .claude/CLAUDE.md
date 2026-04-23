@@ -57,14 +57,18 @@ Any code change — new press class, metric tweak, eval harness, test — happen
 3. PR into `main`; `make test` must pass.
 4. Log observations to `documentation/journal.md` as you go. Promote to `documentation/findings.md` when consolidated.
 
-### Benchmark scaffolding status (as of 2026-04-19)
+### Benchmark scaffolding status (as of 2026-04-23)
 
 | Benchmark | Status | Location |
 |-----------|--------|----------|
 | SCBench | Scaffolded (loader + metrics + flattening script). Demoted to appendix — see `documentation/findings.md`. | `kvpress/evaluation/benchmarks/scbench/` |
-| ConvCodeWorld | Scaffolded (loader + metrics + flattening script). Primary coding benchmark. | `kvpress/evaluation/benchmarks/convcodeworld/` |
+| ConvCodeWorld | Scaffolded. `live_loop.py` fully expanded: static-replay + live-loop modes, VRAM guards, FA3 flashdecode tracking, tokenizer-artefact normalisation, compilable-prefix fallback. `modal_app.py` rewritten with extracted constants + reproducible FA3 build layer. `modal_run.sh` rewritten. `MODAL_HYPERPARAMS.md` added. `executor.py` has `normalize_tokenizer_artifacts`, `normalize_candidate_code`, `_longest_compilable_prefix`. | `kvpress/evaluation/benchmarks/convcodeworld/` |
 | LongMemEval | **Not yet scaffolded.** Primary conversational. Reuse EpiCache's `data/longmemeval/convert_longmemeval.py` as the data-prep entry point. | TBD `kvpress/evaluation/benchmarks/longmemeval/` |
 | TopiOCQA | **Not yet scaffolded.** Topic-shift validation. Load via `datasets.load_dataset("McGill-NLP/TopiOCQA", "plain_text")`. | TBD `kvpress/evaluation/benchmarks/topiocqa/` |
+
+**Week-1 press primitives landed** (2026-04-22): `TurnBoundary`, `TurnAwareMixin`, `TurnFloorPress` (policy A), `RoleBoundaryAnchorPress` (policy B), `TurnAwareGlobalPress` (composer). Tests green. Registry updated with `turnkv_*` and `baseline_*` entries. `LoyaltyPress` (policy C) is the remaining press primitive.
+
+**ConvCodeWorld execution infrastructure** (2026-04-23): `live_loop.py` expanded with static-replay/live-loop modes, VRAM guards, FA3 flashdecode tracking, tokenizer-artefact normalisation, compilable-prefix fallback. `attention_patch.py` adds `reset_flashdecode_tracking` / `flashdecode_used_layers`. `executor.py` adds `normalize_tokenizer_artifacts`, `normalize_candidate_code`, `_longest_compilable_prefix`. `modal_app.py` rewritten with extracted constants + reproducible FA3 build layer. `modal_run.sh` rewritten to run `no_press` full-cache baseline. `MODAL_HYPERPARAMS.md` added as CLI flag reference.
 
 **Shared blocker**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`). The existing `evaluate.py` treats each question independently; all four benchmarks need a harness that preserves the KV cache across turns and re-applies the press at each boundary. This is the heart of the project. **Architecture and API locked down in `context/decisions/001-multi-turn-harness.md`** (2026-04-19). Teammates should implement against that ADR.
 

@@ -14,12 +14,14 @@ import tempfile
 import textwrap
 import traceback
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
 
 NO_SYNTAX_ERRORS = "No syntax errors"
 PASSED_ALL_TEST_RUNS = "Passed all test runs"
+_BYTE_LEVEL_ARTIFACTS = str.maketrans({"Ċ": "\n", "Ġ": " ", "ĉ": "\t"})
 
 
 @dataclass
@@ -44,10 +46,15 @@ def task_get(task: Mapping[str, Any] | Any, key: str, default: Any = None) -> An
     return getattr(task, key, default)
 
 
+def normalize_tokenizer_artifacts(text: str) -> str:
+    return str(text or "").translate(_BYTE_LEVEL_ARTIFACTS)
+
+
 def extract_code(text: str) -> str:
     """Extract Python code from a markdown block, falling back to raw text."""
     if not text:
         return ""
+    text = normalize_tokenizer_artifacts(text)
     cleaned = text.split("\n\n---\n\n", 1)[0]
     match = re.search(r"```(?:python|py)?[ \t]*\n(.*?)```", cleaned, flags=re.DOTALL | re.IGNORECASE)
     if match is None:
@@ -55,6 +62,39 @@ def extract_code(text: str) -> str:
     if match is not None:
         return match.group(1).strip()
     return cleaned.replace("```", "").strip()
+
+
+def _contains_entry_point(code: str, entry_point: str) -> bool:
+    return bool(entry_point and re.search(rf"\bdef\s+{re.escape(entry_point)}\b", code))
+
+
+def _longest_compilable_prefix(code: str, entry_point: str = "") -> str:
+    lines = code.splitlines()
+    start_indices = [0]
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(("import ", "from ", "class ")):
+            start_indices.append(index)
+        elif entry_point and re.match(rf"def\s+{re.escape(entry_point)}\b", stripped):
+            start_indices.append(index)
+
+    seen_starts: set[int] = set()
+    for start in start_indices:
+        if start in seen_starts:
+            continue
+        seen_starts.add(start)
+        for end in range(len(lines), start, -1):
+            prefix = "\n".join(lines[start:end]).strip()
+            if not prefix:
+                continue
+            if entry_point and not _contains_entry_point(prefix, entry_point):
+                continue
+            try:
+                compile(prefix + "\n", "candidate.py", mode="exec")
+            except Exception:
+                continue
+            return prefix
+    return code
 
 
 def compile_code(code: str) -> str:
@@ -76,8 +116,8 @@ def normalize_candidate_code(task: Mapping[str, Any] | Any, code: str) -> str:
     entry_point = str(task_get(task, "entry_point", "") or "")
     if code_prompt and entry_point and f"def {entry_point}" not in code:
         separator = "" if code_prompt.endswith((" ", "\t", "\n")) else "\n"
-        return code_prompt + separator + code
-    return code
+        code = code_prompt + separator + code
+    return _longest_compilable_prefix(code, entry_point)
 
 
 def build_test_script(task: Mapping[str, Any] | Any, candidate_code: str) -> str:
@@ -121,6 +161,7 @@ def _limit_resources(memory_mb: int, cpu_seconds: int) -> None:
         resource.setrlimit(resource.RLIMIT_CPU, (int(cpu_seconds), int(cpu_seconds) + 1))
 
 
+@lru_cache(maxsize=1)
 def _can_unshare_network() -> bool:
     if os.name != "posix" or shutil.which("unshare") is None:
         return False

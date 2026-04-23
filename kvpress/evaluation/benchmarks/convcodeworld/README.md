@@ -99,16 +99,24 @@ python evaluate.py \
 
 `--data_dir` selects one of the five feedback configurations. `--compression_ratio 0.875` corresponds to the 1/8 keep-rate (7/8 evicted).
 
-### Live-loop runner
+### Static vs. live-loop runner
 
-The opt-in live-loop path generates code, executes that generated code, builds deterministic compilation/execution/verbal feedback, and feeds that feedback into the next turn while carrying the KV cache forward:
+The ConvCodeWorld execution runner supports `benchmark_mode`:
+
+- `static`: static replay. Prior reference code and feedback are teacher-forced from `ConvCodeWorld/convcodebench`; the generated code at each turn is still executed against BigCodeBench tests. All turns run because later context is fixed by the reference trajectory.
+- `live`: live loop. Generated code is executed, new feedback is built from that generated code, and the result feeds the next turn.
+
+The default is `live` for backward compatibility. For the local Fire CLI, use
+`--benchmark_mode=static` or `--benchmark_mode=live`:
 
 ```bash
 cd kvpress/evaluation
 python benchmarks/convcodeworld/live_loop.py \
+    --benchmark_mode=live \
     --press_name=snapkv \
     --compression_ratio=0.5 \
-    --model=meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --feedback_model=google/gemma-4-E2B-it \
     --feedback_config=CF_EF_UNIT_SNF \
     --num_eval_examples=10
 ```
@@ -118,7 +126,12 @@ For Modal:
 ```bash
 cd kvpress
 modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
+    --benchmark-mode live \
     --press-names snapkv,streaming_llm,expected_attention \
+    --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+    --feedback-model google/gemma-4-E2B-it \
+    --attn-implementation flash_attention_3 \
+    --feedback-attn-implementation flash_attention_3 \
     --compression-ratio 0.5 \
     --snapkv-window-size 64 \
     --snapkv-kernel-size 5 \
@@ -130,8 +143,17 @@ modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
     --num-eval-examples 10
 ```
 
-This is intentionally separate from the static ConvCodeBench replay protocol above because live-loop feedback changes later turns based on each generated solution.
-Live-loop runs default to `--cot=True`, use the loaded Llama model as the verbal-feedback simulator, early-stop once generated code passes the available tests, and expose the base-press knobs through the top-level Modal command.
+Use `--benchmark-mode static` on the same Modal command to run static replay
+instead. In static mode, `--feedback-model` and
+`--verbal-feedback-max-new-tokens` are ignored because verbal feedback comes
+from the reference trajectory rather than a simulator model.
+
+Static replay and live loop answer different questions: static replay isolates
+the compression effect under a fixed conversation, while live loop measures the
+fully interactive cascade where later turns depend on each generated solution.
+Live-loop Modal runs default to exact H100 GPUs with `flash_attention_3` for DeepSeek-R1-Distill-Llama-8B code generation, `sdpa` for Gemma 4 E2B verbal feedback, `--cot=True`, early-stop once generated code passes the available tests, and expose the base-press knobs through the top-level Modal command.
+The Modal image builds and caches a reduced BF16-only FlashAttention-3 wheel before copying repo source so ordinary code changes do not rebuild the H100 kernels.
+It also pins Transformers to an upstream GitHub commit with Gemma4 support for the feedback model.
 Turn-aware runs can use registry names such as `turnkv_snapkv` or pass
 `--alpha-floor`, `--alpha-anchor`, and `--alpha-loyalty` with a base press.
 See `MODAL_SETUP.md` for the full Modal setup runbook.

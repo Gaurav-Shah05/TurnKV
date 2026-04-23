@@ -103,14 +103,21 @@ Per-problem inspection of SCBench revealed its "multi-turn" mode is independent 
 | Topic-shift validation | **TopiOCQA** | Ground-truth topic labels per turn — isolates Cross-Turn Accumulation's topic-shift detection. |
 | Appendix | **SCBench** (reframed) | Cross-query KV retention on shared contexts. Numbers still useful; claim rewritten. |
 
-## Status (2026-04-19)
+## Status (2026-04-23)
 
 - **Scaffolded**: SCBench (demoted-appendix), ConvCodeWorld (primary coding), team collaboration folders.
 - **Not yet scaffolded**: LongMemEval, TopiOCQA — next.
-- **Shared blocker across all four**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`). ADR for its API lives at `context/decisions/001-multi-turn-harness.md` (TBD).
+- **Week-1 press primitives landed**: `TurnBoundary`, `TurnAwareMixin`, `TurnFloorPress` (policy A), `RoleBoundaryAnchorPress` (policy B), `TurnAwareGlobalPress` (composer). Tests green. Registry updated with `turnkv_*` and `baseline_*` entries.
+- **ConvCodeWorld live-loop runner expanded** (`live_loop.py`): static-replay and live-loop modes, VRAM-safety guards, FA3 flashdecode tracking, tokenizer-artefact normalisation, compilable-prefix fallback for truncated generation.
+- **`attention_patch.py`**: flashdecode tracking (`reset_flashdecode_tracking`, `flashdecode_used_layers`) to verify FA3 decode path is active on H100.
+- **`executor.py`**: `normalize_tokenizer_artifacts`, `normalize_candidate_code`, `_longest_compilable_prefix` helpers.
+- **`modal_app.py`** fully rewritten with extracted constants, reproducible FA3 build layer, `gemma-3-4b-it` feedback model.
+- **`modal_run.sh`** rewritten: targets `run_convcodeworld_live`, runs `no_press` full-cache baseline with `require_flashdecode` and VRAM guard.
+- **`MODAL_HYPERPARAMS.md`**: new reference doc for all Modal CLI flags.
+- **Shared blocker**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`) — still needed to wire ConvCodeWorld and LongMemEval end-to-end.
 - **Next up** (roughly in order):
-  1. ADR `001-multi-turn-harness.md` — lock down the turn-aware runner API before anyone codes against it.
-  2. Scaffold LongMemEval + TopiOCQA benchmarks following the ConvCodeWorld/SCBench template.
-  3. Port per-benchmark metrics to match upstream reference implementations.
-  4. Scaffold the three turn-aware Press classes as `ScorerPress` subclasses with failing tests.
-  5. First EpiCache baseline run on LongMemEval and LoCoMo with Llama-3.1-8B-Instruct (paper-comparable numbers) plus DeepSeek-R1-Distill-Llama-8B (stretch).
+  1. `LoyaltyPress` (policy C) — last press primitive.
+  2. `multi_turn_evaluate.py` harness (ADR 001 §4).
+  3. Scaffold LongMemEval + TopiOCQA benchmark loaders.
+  4. Modal Gemma judge (`modal_judge_app.py`) + 50-probe meta-eval.
+  5. First baseline full-cache run on ConvCodeWorld via `modal_run.sh`.

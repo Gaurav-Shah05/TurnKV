@@ -12,6 +12,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -22,7 +23,7 @@ import yaml
 from datasets import load_dataset
 from fire import Fire
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache, FineGrainedFP8Config
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer, DynamicCache, FineGrainedFP8Config
 
 _ROOT_EVAL = Path(__file__).resolve().parents[2]
 _KV_ROOT = _ROOT_EVAL.parent
@@ -43,6 +44,7 @@ from kvpress import (  # noqa: E402
     TurnFloorPress,
     TurnAwareGlobalPress,
 )
+from kvpress.attention_patch import flashdecode_used_layers, reset_flashdecode_tracking  # noqa: E402
 from kvpress.presses.answer_suffix_decoding_press import AnswerSuffixDecodingPress  # noqa: E402
 from kvpress.presses.base_press import BasePress  # noqa: E402
 
@@ -50,6 +52,8 @@ from benchmarks.convcodeworld.executor import (  # noqa: E402
     PASSED_ALL_TEST_RUNS,
     build_feedback,
     extract_code,
+    normalize_candidate_code,
+    normalize_tokenizer_artifacts,
     run_candidate,
     task_get,
     trim_feedback,
@@ -57,13 +61,21 @@ from benchmarks.convcodeworld.executor import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-DEFAULT_STOP_SEQUENCES = ("\n```", "\n### Feedback", "\n### Iteration")
+DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+DEFAULT_FEEDBACK_MODEL = "google/gemma-3-4b-it"
+DEFAULT_STOP_SEQUENCES = ("\n```\n", "\n### Feedback", "\n### Iteration")
 
 
 @dataclass
 class ConvCodeWorldLiveConfig:
+    benchmark_mode: str = "live"
     model: str = DEFAULT_MODEL
+    feedback_model: Optional[str] = DEFAULT_FEEDBACK_MODEL
+    attn_implementation: Optional[str] = "flash_attention_3"
+    feedback_attn_implementation: Optional[str] = "flash_attention_3"
+    full_kv_cache: bool = False
+    require_flashdecode: bool = False
+    error_on_kv_cache_vram_exhaustion: bool = False
     press_name: str = "snapkv"
     compression_ratio: float = 0.5
     key_channel_compression_ratio: Optional[float] = None
@@ -130,6 +142,12 @@ def _git_revision() -> str:
 
 def infer_device(model: AutoModelForCausalLM) -> torch.device:
     try:
+        for parameter in model.parameters():
+            if parameter.device.type == "cuda":
+                return parameter.device
+    except Exception:
+        pass
+    try:
         d = getattr(model, "device", None)
         if d is not None and getattr(d, "type", None) != "meta":
             return d
@@ -138,9 +156,114 @@ def infer_device(model: AutoModelForCausalLM) -> torch.device:
     return next(model.parameters()).device
 
 
+def _cache_tensor_devices(cache: DynamicCache) -> set[torch.device]:
+    devices: set[torch.device] = set()
+    for layer in getattr(cache, "layers", []):
+        for attr in ("keys", "values", "_quantized_keys", "_quantized_values"):
+            tensor = getattr(layer, attr, None)
+            if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
+                devices.add(tensor.device)
+    return devices
+
+
+def _assert_cache_on_device(cache: DynamicCache, expected_device: torch.device, label: str) -> None:
+    expected = torch.device(expected_device)
+    devices = _cache_tensor_devices(cache)
+    bad_devices = sorted(
+        str(device)
+        for device in devices
+        if device.type != expected.type
+        or (expected.type == "cuda" and device.index not in (None, expected.index))
+    )
+    if bad_devices:
+        raise RuntimeError(
+            f"{label} moved off {expected}; observed cache tensor devices: {bad_devices}."
+        )
+
+
 def _target_from_ratio(global_budget: int, compression_ratio: float) -> int:
     keep_rate = max(0.0, min(1.0, 1.0 - float(compression_ratio)))
     return max(1, int(round(global_budget * keep_rate)))
+
+
+def _is_flash_attention_3(implementation: Optional[str]) -> bool:
+    return str(implementation or "").endswith("flash_attention_3")
+
+
+def _model_uses_flash_attention_3(model) -> bool:
+    return _is_flash_attention_3(getattr(model.config, "_attn_implementation", None))
+
+
+def _text_config(model) -> Any:
+    config = model.config
+    get_text_config = getattr(config, "get_text_config", None)
+    if callable(get_text_config):
+        try:
+            return get_text_config(decoder=True)
+        except TypeError:
+            return get_text_config()
+    return getattr(config, "text_config", config)
+
+
+def _format_num_bytes(num_bytes: int) -> str:
+    value = float(num_bytes)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if unit == units[-1] or value < 1024.0:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{num_bytes}B"
+
+
+def _estimate_kv_cache_bytes(model, seq_len: int) -> int:
+    cfg = _text_config(model)
+    num_attention_heads = int(getattr(cfg, "num_attention_heads"))
+    num_layers = int(getattr(cfg, "num_hidden_layers"))
+    num_key_value_heads = int(getattr(cfg, "num_key_value_heads", num_attention_heads))
+    head_dim = getattr(cfg, "head_dim", None)
+    if head_dim is None:
+        head_dim = int(getattr(cfg, "hidden_size") // num_attention_heads)
+    dtype = getattr(model, "dtype", None)
+    if not isinstance(dtype, torch.dtype):
+        dtype = next(model.parameters()).dtype
+    bytes_per_element = torch.empty((), dtype=dtype).element_size()
+    return 2 * num_layers * num_key_value_heads * int(head_dim) * int(seq_len) * bytes_per_element
+
+
+def _assert_kv_cache_fits_available_vram(model, cache: DynamicCache, extra_tokens: int, *, label: str) -> None:
+    device = infer_device(model)
+    if device.type != "cuda":
+        return
+    projected_seq_len = cache.get_seq_length() + max(0, int(extra_tokens))
+    estimated_bytes = _estimate_kv_cache_bytes(model, projected_seq_len)
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    if estimated_bytes <= free_bytes:
+        return
+    raise RuntimeError(
+        f"{label} would grow the code-generation KV cache to about "
+        f"{_format_num_bytes(estimated_bytes)} at seq_len={projected_seq_len}, "
+        f"but only {_format_num_bytes(free_bytes)} of free VRAM remains on {device} "
+        f"(total {_format_num_bytes(total_bytes)}). Refusing to continue because "
+        "error_on_kv_cache_vram_exhaustion=True and full_kv_cache keeps the cache resident."
+    )
+
+
+def _normalize_benchmark_mode(value: str) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "live": "live",
+        "live_loop": "live",
+        "liveloop": "live",
+        "static": "static",
+        "static_replay": "static",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            f"benchmark_mode must be one of live, live_loop, static, or static_replay; got {value!r}"
+        )
+    return aliases[mode]
 
 
 def _setup_logging(level: str) -> None:
@@ -411,6 +534,45 @@ def _convcodeworld_task_ids(feedback_config: str) -> set[str]:
     return set(str(x) for x in cfg["ITER=1"]["task_id"])
 
 
+def _label_to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    return normalized in {"pass", "passed", "true", "1", "yes"}
+
+
+def _load_reference_trajectories(feedback_config: str) -> dict[str, list[dict[str, Any]]]:
+    ds = load_dataset("ConvCodeWorld/convcodebench", split="train")
+    row = ds[0]
+    cfg = row.get(feedback_config)
+    if not cfg or "ITER=1" not in cfg:
+        raise ValueError(f"Feedback config {feedback_config!r} not found in ConvCodeWorld/convcodebench")
+
+    first_iter = cfg["ITER=1"]
+    trajectories: dict[str, list[dict[str, Any]]] = {}
+    for task_idx, task_id in enumerate(first_iter["task_id"]):
+        turns: list[dict[str, Any]] = []
+        for iteration in range(1, 11):
+            it = cfg.get(f"ITER={iteration}")
+            if not it or task_idx >= len(it.get("previous_code", [])):
+                continue
+            turns.append(
+                {
+                    "iteration": iteration,
+                    "task_id": str(task_id),
+                    "previous_code": it["previous_code"][task_idx],
+                    "compilation_feedback": it["compilation_feedback"][task_idx],
+                    "execution_feedback": it["execution_feedback"][task_idx],
+                    "verbal_feedback": it["verbal_feedback"][task_idx],
+                    "label": _label_to_bool(it["label"][task_idx]),
+                }
+            )
+        trajectories[str(task_id)] = turns
+    return trajectories
+
+
 def _parse_task_ids(value: str | None) -> set[str] | None:
     if value is None or value.strip() == "":
         return None
@@ -447,9 +609,10 @@ def _load_tasks(cfg: ConvCodeWorldLiveConfig) -> list[dict[str, Any]]:
 
 def _results_dir(cfg: ConvCodeWorldLiveConfig) -> Path:
     parts = [
-        "live",
+        _normalize_benchmark_mode(cfg.benchmark_mode),
         cfg.feedback_config,
         cfg.model.replace("/", "--"),
+        f"fb-{(cfg.feedback_model or cfg.model).replace('/', '--')}",
         cfg.press_name,
         f"{cfg.compression_ratio:.2f}",
     ]
@@ -504,6 +667,12 @@ def _model_forward(model, **kwargs):
         return model(**kwargs)
 
 
+def _decode_token_ids(tokenizer, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    return normalize_tokenizer_artifacts(tokenizer.decode(token_ids, skip_special_tokens=True))
+
+
 @torch.inference_mode()
 def _prefill_text(model, tokenizer, cache: DynamicCache, text: str, max_tokens: int | None = None) -> None:
     ids = _encode(tokenizer, text, max_tokens=max_tokens)
@@ -531,9 +700,15 @@ def _generate_after_prompt(
     max_new_tokens: int,
     decode_press: AnswerSuffixDecodingPress | None,
     stop_sequences: Iterable[str] = DEFAULT_STOP_SEQUENCES,
+    prompt_ids: Optional[list[int]] = None,
+    require_flashdecode: bool = False,
 ) -> str:
+    if require_flashdecode and not _model_uses_flash_attention_3(model):
+        raise RuntimeError(
+            "require_flashdecode=True but the model is not configured with attn_implementation='flash_attention_3'."
+        )
     device = infer_device(model)
-    prompt_ids = _encode(tokenizer, prompt)
+    prompt_ids = list(prompt_ids) if prompt_ids is not None else _encode(tokenizer, prompt)
     if not prompt_ids:
         return ""
     input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
@@ -551,14 +726,16 @@ def _generate_after_prompt(
     eos_ids = eos if isinstance(eos, list) else [eos]
     eos_ids = {int(x) for x in eos_ids if x is not None}
 
-    generated: list[torch.Tensor] = []
+    generated_ids: list[int] = []
     next_token = outputs.logits[0, -1].argmax()
 
     ctx = decode_press(model) if decode_press is not None else torch.inference_mode()
+    if require_flashdecode:
+        reset_flashdecode_tracking(model)
     with ctx:
         for _ in range(max_new_tokens):
-            generated.append(next_token)
             token_id = int(next_token.item())
+            generated_ids.append(token_id)
             token_tensor = next_token.reshape(1, 1)
             pos = torch.tensor([[cache.get_seq_length()]], dtype=torch.long, device=device)
             outputs = _model_forward(
@@ -568,14 +745,22 @@ def _generate_after_prompt(
                 position_ids=pos,
                 use_cache=True,
             )
-            text = str(tokenizer.decode(torch.stack(generated), skip_special_tokens=True))
-            if token_id in eos_ids or any(seq in text for seq in stop_sequences):
+            tail_text = _decode_token_ids(tokenizer, generated_ids[-32:])
+            if token_id in eos_ids or any(seq in tail_text for seq in stop_sequences):
                 break
             next_token = outputs.logits[0, -1].argmax()
         if decode_press is not None:
             decode_press.finalize_if_needed(model, cache)
 
-    return str(tokenizer.decode(torch.stack(generated), skip_special_tokens=True)) if generated else ""
+    if require_flashdecode and generated_ids:
+        used_layers = flashdecode_used_layers(model)
+        if not used_layers:
+            raise RuntimeError(
+                "Flashdecode was required but no attention layer used flash_attn_with_kvcache during decode."
+            )
+        logger.debug("Verified flashdecode on decode layers: %s", used_layers)
+
+    return _decode_token_ids(tokenizer, generated_ids)
 
 
 def _initial_context(task: dict[str, Any], cfg: ConvCodeWorldLiveConfig, tokenizer) -> str:
@@ -653,16 +838,71 @@ def _simulator_prompt(task: dict[str, Any], code: str, result, cfg: ConvCodeWorl
 
 def _clean_simulator_feedback(text: str) -> str:
     text = str(text or "").strip()
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1].strip()
+    if "<|channel>thought" in text and "<channel|>" in text:
+        text = text.split("<channel|>", 1)[1].strip()
     for marker in ("###", "```", "\n\n---"):
         if marker in text:
             text = text.split(marker, 1)[0].strip()
     return text or "Revise the code using the compilation and execution feedback above."
 
 
+def _is_degenerate_feedback(text: str) -> bool:
+    words = str(text or "").split()
+    if len(words) < 24:
+        return False
+    for width in (3, 4, 5):
+        grams = [" ".join(words[i : i + width]).lower() for i in range(len(words) - width + 1)]
+        if not grams:
+            continue
+        top_count = max(grams.count(gram) for gram in set(grams))
+        if top_count * width >= len(words) * 0.45:
+            return True
+    return False
+
+
+def _last_error_line(text: str) -> str:
+    for line in reversed(str(text or "").splitlines()):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("~", "^", "-", "=")):
+            return stripped
+    return ""
+
+
+def _fallback_verbal_feedback(result) -> str:
+    if result.passed:
+        return "The previous code passed the available tests. Stop the live loop."
+    if result.status == "compile_error":
+        summary = _last_error_line(result.compilation_feedback)
+        if summary:
+            return f"Fix the compilation failure: {summary}. Preserve the required function signature."
+        return "Fix the compilation failure and preserve the required function signature."
+    if result.status == "timeout":
+        return "The candidate timed out. Reduce the algorithmic complexity or remove non-terminating work."
+    summary = _last_error_line(result.execution_feedback)
+    if summary:
+        return f"The tests fail with {summary}. Fix that behavior while preserving the required function signature."
+    return "Use the failing test output to fix the implementation while preserving the required function signature."
+
+
+def _format_feedback_prompt(tokenizer, prompt: str) -> str:
+    if not getattr(tokenizer, "chat_template", None):
+        return prompt
+    try:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return prompt
+
+
 def _simulate_verbal_feedback(model, tokenizer, task: dict[str, Any], code: str, result, cfg: ConvCodeWorldLiveConfig):
     if result.passed and cfg.early_stop_on_pass:
         return "The previous code passed the available tests. Stop the live loop."
-    prompt = _simulator_prompt(task, code, result, cfg)
+    prompt = _format_feedback_prompt(tokenizer, _simulator_prompt(task, code, result, cfg))
     raw = _generate_after_prompt(
         model,
         tokenizer,
@@ -671,8 +911,44 @@ def _simulate_verbal_feedback(model, tokenizer, task: dict[str, Any], code: str,
         max_new_tokens=cfg.verbal_feedback_max_new_tokens,
         decode_press=None,
         stop_sequences=("\n###", "```", "\n\n---"),
+        require_flashdecode=cfg.require_flashdecode,
     )
-    return _clean_simulator_feedback(raw)
+    feedback = _clean_simulator_feedback(raw)
+    if _is_degenerate_feedback(feedback):
+        logger.warning("Feedback model output was degenerate; using deterministic feedback fallback.")
+        return _fallback_verbal_feedback(result)
+    return feedback
+
+
+def _reference_feedback(turn: dict[str, Any], cfg: ConvCodeWorldLiveConfig) -> str:
+    sections: list[str] = []
+    if cfg.include_compilation_feedback:
+        compilation = str(turn.get("compilation_feedback") or "").strip()
+        if compilation:
+            sections.append("Compilation feedback:\n" + trim_feedback(compilation))
+    if cfg.include_execution_feedback:
+        execution = str(turn.get("execution_feedback") or "").strip()
+        if execution:
+            sections.append("Execution feedback:\n" + trim_feedback(execution))
+    if cfg.include_verbal_feedback:
+        verbal = str(turn.get("verbal_feedback") or "").strip()
+        if verbal:
+            sections.append("Verbal feedback:\n" + trim_feedback(verbal))
+    return "\n\n".join(sections).strip()
+
+
+def _reference_answer_text(code: str) -> str:
+    return f"{extract_code(code)}\n```\n"
+
+
+def _truncate_cache(cache: DynamicCache, seq_len: int) -> None:
+    for cache_layer in cache.layers:
+        if hasattr(cache_layer, "keys") and cache_layer.keys is not None and cache_layer.keys.numel() > 0:
+            cache_layer.keys = cache_layer.keys[:, :, :seq_len, :]
+        if hasattr(cache_layer, "values") and cache_layer.values is not None and cache_layer.values.numel() > 0:
+            cache_layer.values = cache_layer.values[:, :, :seq_len, :]
+        if hasattr(cache_layer, "cumulative_length"):
+            cache_layer.cumulative_length = min(int(getattr(cache_layer, "cumulative_length")), seq_len)
 
 
 def _maybe_global_compress(model, cache: DynamicCache, press: TurnAwareGlobalPress | None, target: int) -> None:
@@ -699,6 +975,7 @@ def _append_after_pass_rows(
                 "session_id": f"{cfg.feedback_config}/{task_get(task, 'task_id')}",
                 "task_id": task_get(task, "task_id"),
                 "feedback_config": cfg.feedback_config,
+                "benchmark_mode": cfg.benchmark_mode,
                 "iteration": iteration,
                 "predicted_answer": code,
                 "generated_code": code,
@@ -719,44 +996,148 @@ def _append_after_pass_rows(
 class ConvCodeWorldLiveRunner:
     def __init__(self, cfg: ConvCodeWorldLiveConfig):
         self.cfg = cfg
+        self.cfg.benchmark_mode = _normalize_benchmark_mode(self.cfg.benchmark_mode)
         _apply_feedback_config(self.cfg)
+        if self.cfg.full_kv_cache:
+            if self.cfg.benchmark_mode != "live":
+                raise ValueError("full_kv_cache is only supported in benchmark_mode='live'.")
+            if self.cfg.press_name != "no_press":
+                raise ValueError(
+                    "full_kv_cache=True requires press_name='no_press' so the code-generation KV cache is never evicted."
+                )
+            self.cfg.compression_ratio = 0.0
+        if self.cfg.require_flashdecode:
+            if not _is_flash_attention_3(self.cfg.attn_implementation):
+                raise ValueError(
+                    "require_flashdecode=True requires attn_implementation='flash_attention_3' for the code model."
+                )
+            effective_feedback_attn = self.cfg.feedback_attn_implementation or self.cfg.attn_implementation
+            if self.cfg.include_verbal_feedback and not _is_flash_attention_3(effective_feedback_attn):
+                raise ValueError(
+                    "require_flashdecode=True requires feedback_attn_implementation='flash_attention_3' for the feedback model."
+                )
         _setup_logging(self.cfg.log_level)
         random.seed(self.cfg.seed)
         torch.manual_seed(self.cfg.seed)
         self.output_dir = _results_dir(self.cfg)
         self.global_target = _target_from_ratio(self.cfg.global_budget, self.cfg.compression_ratio)
 
-    def setup_model(self):
+    def _load_tokenizer(self, model_name: str):
+        try:
+            return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        except Exception:
+            processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            return getattr(processor, "tokenizer", processor)
+
+    def _load_model(self, model_name: str, attn_implementation: Optional[str]):
         model_kwargs = dict(self.cfg.model_kwargs or {})
         model_kwargs.setdefault("torch_dtype", torch.bfloat16)
+        if attn_implementation:
+            model_kwargs.setdefault("attn_implementation", attn_implementation)
         if self.cfg.fp8:
             model_kwargs["quantization_config"] = FineGrainedFP8Config()
-        try:
-            import flash_attn  # noqa: F401
-
-            model_kwargs.setdefault("attn_implementation", "flash_attention_2")
-        except ImportError:
-            pass
-        tokenizer = AutoTokenizer.from_pretrained(self.cfg.model, trust_remote_code=True)
+        if model_kwargs.get("attn_implementation") == "flash_attention_3":
+            try:
+                import flash_attn_interface  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError(
+                    "attn_implementation='flash_attention_3' requires FlashAttention-3. "
+                    "Install the Dao-AILab flash-attention hopper package in the runtime image."
+                ) from exc
+        logger.info(
+            "Loading %s with attn_implementation=%s",
+            model_name,
+            model_kwargs.get("attn_implementation"),
+        )
+        device_map = model_kwargs.pop("device_map", None)
+        if device_map is None:
+            device_map = {"": 0} if torch.cuda.is_available() else "auto"
+        tokenizer = self._load_tokenizer(model_name)
         model = AutoModelForCausalLM.from_pretrained(
-            self.cfg.model,
+            model_name,
             trust_remote_code=True,
-            device_map="auto",
+            device_map=device_map,
             **model_kwargs,
         )
         model.eval()
+        if model_kwargs.get("attn_implementation") == "flash_attention_3":
+            non_cuda_devices = sorted(
+                {
+                    str(parameter.device)
+                    for parameter in model.parameters()
+                    if parameter.device.type != "cuda"
+                }
+            )
+            if non_cuda_devices:
+                raise RuntimeError(
+                    "FlashAttention-3 requires all model parameters on CUDA, "
+                    f"but {model_name} has parameters on {non_cuda_devices}. "
+                    "Use a larger GPU or an attention implementation that supports CPU/offload."
+                )
         return model, tokenizer
+
+    def setup_models(self):
+        model, tokenizer = self._load_model(self.cfg.model, self.cfg.attn_implementation)
+        if self.cfg.benchmark_mode == "static":
+            return model, tokenizer, None, None
+        if not self.cfg.include_verbal_feedback:
+            return model, tokenizer, model, tokenizer
+        feedback_model_name = self.cfg.feedback_model or self.cfg.model
+        if feedback_model_name == self.cfg.model:
+            return model, tokenizer, model, tokenizer
+        feedback_attn_implementation = (
+            self.cfg.feedback_attn_implementation or self.cfg.attn_implementation
+        )
+        feedback_model, feedback_tokenizer = self._load_model(
+            feedback_model_name,
+            feedback_attn_implementation,
+        )
+        return model, tokenizer, feedback_model, feedback_tokenizer
 
     def run(self) -> None:
         tasks = _load_tasks(self.cfg)
-        model, tokenizer = self.setup_model()
+        model, tokenizer, feedback_model, feedback_tokenizer = self.setup_models()
         base_press = _setup_press(self.cfg)
         global_press = _as_global_press(base_press, self.cfg)
         scorer = _decode_scorer(global_press)
+        reference_trajectories = (
+            _load_reference_trajectories(self.cfg.feedback_config)
+            if self.cfg.benchmark_mode == "static"
+            else None
+        )
 
         rows: list[dict[str, Any]] = []
-        for task in tqdm(tasks, desc="ConvCodeWorld live"):
-            rows.extend(self._run_task(model, tokenizer, task, global_press, scorer))
+        for task_idx, task in enumerate(tqdm(tasks, desc=f"ConvCodeWorld {self.cfg.benchmark_mode}"), start=1):
+            task_start = time.perf_counter()
+            task_id = task_get(task, "task_id")
+            logger.info("Starting task %s/%s: %s", task_idx, len(tasks), task_id)
+            if self.cfg.benchmark_mode == "static":
+                task_rows = self._run_task_static(
+                    model,
+                    tokenizer,
+                    task,
+                    reference_trajectories or {},
+                    global_press,
+                    scorer,
+                )
+            else:
+                task_rows = self._run_task(
+                    model,
+                    tokenizer,
+                    feedback_model,
+                    feedback_tokenizer,
+                    task,
+                    global_press,
+                    scorer,
+                )
+            rows.extend(task_rows)
+            logger.info(
+                "Finished task %s/%s: %s in %.1fs",
+                task_idx,
+                len(tasks),
+                task_id,
+                time.perf_counter() - task_start,
+            )
             torch.cuda.empty_cache()
 
         df = pd.DataFrame(rows)
@@ -780,6 +1161,8 @@ class ConvCodeWorldLiveRunner:
         self,
         model,
         tokenizer,
+        feedback_model,
+        feedback_tokenizer,
         task: dict[str, Any],
         global_press: TurnAwareGlobalPress | None,
         scorer: ScorerPress | None,
@@ -795,19 +1178,41 @@ class ConvCodeWorldLiveRunner:
             if global_press is not None:
                 global_press.on_turn_start(0, "context", cache.get_seq_length())
             context_start = cache.get_seq_length()
+            initial_context_ids = _encode(tokenizer, initial_context, max_tokens=self.cfg.max_input_tokens)
+            if self.cfg.error_on_kv_cache_vram_exhaustion:
+                _assert_kv_cache_fits_available_vram(
+                    model,
+                    cache,
+                    len(initial_context_ids),
+                    label=f"task {task_get(task, 'task_id')} initial context",
+                )
             _prefill_text(model, tokenizer, cache, initial_context, max_tokens=self.cfg.max_input_tokens)
             if global_press is not None:
                 global_press.on_turn_end(0, "context", context_start, cache.get_seq_length())
 
             for iteration in range(1, self.cfg.max_turns + 1):
+                iter_start = time.perf_counter()
+                logger.info("Starting task %s iteration %s", task_get(task, "task_id"), iteration)
                 prompt = _revision_prompt(iteration, feedback)
+                prompt_ids = _encode(tokenizer, prompt)
+                if self.cfg.error_on_kv_cache_vram_exhaustion:
+                    _assert_kv_cache_fits_available_vram(
+                        model,
+                        cache,
+                        len(prompt_ids) + self.cfg.max_new_tokens,
+                        label=f"task {task_get(task, 'task_id')} iteration {iteration}",
+                    )
                 if global_press is not None:
                     global_press.on_turn_start(iteration, "user", cache.get_seq_length())
                 user_start = cache.get_seq_length()
 
-                answer_start = cache.get_seq_length() + len(_encode(tokenizer, prompt))
+                answer_start = cache.get_seq_length() + len(prompt_ids)
                 decode_press = None
-                if scorer is not None:
+                if (
+                    not self.cfg.full_kv_cache
+                    and scorer is not None
+                    and self.cfg.max_new_tokens > self.cfg.local_budget
+                ):
                     decode_press = AnswerSuffixDecodingPress(
                         base_press=scorer,
                         answer_start_seq_len=answer_start,
@@ -822,13 +1227,15 @@ class ConvCodeWorldLiveRunner:
                     prompt,
                     max_new_tokens=self.cfg.max_new_tokens,
                     decode_press=decode_press,
+                    prompt_ids=prompt_ids,
+                    require_flashdecode=self.cfg.require_flashdecode,
                 )
                 user_end = answer_start
                 if global_press is not None:
                     global_press.on_turn_end(iteration, "user", user_start, user_end)
                     global_press.on_turn_end(iteration, "assistant", user_end, cache.get_seq_length())
 
-                code = extract_code(generated)
+                code = normalize_candidate_code(task, extract_code(generated))
                 result = run_candidate(
                     task,
                     code,
@@ -842,11 +1249,30 @@ class ConvCodeWorldLiveRunner:
                 cache_after = cache.get_seq_length()
                 verbal_feedback = None
                 if self.cfg.include_verbal_feedback:
-                    if global_press is None:
-                        verbal_feedback = _simulate_verbal_feedback(model, tokenizer, task, code, result, self.cfg)
-                    else:
+                    generation_device = infer_device(model)
+                    _assert_cache_on_device(
+                        cache,
+                        generation_device,
+                        "code generation cache before feedback",
+                    )
+                    feedback_args = (
+                        feedback_model,
+                        feedback_tokenizer,
+                        task,
+                        code,
+                        result,
+                        self.cfg,
+                    )
+                    if feedback_model is model and global_press is not None:
                         with global_press.suspend_hooks():
-                            verbal_feedback = _simulate_verbal_feedback(model, tokenizer, task, code, result, self.cfg)
+                            verbal_feedback = _simulate_verbal_feedback(*feedback_args)
+                    else:
+                        verbal_feedback = _simulate_verbal_feedback(*feedback_args)
+                    _assert_cache_on_device(
+                        cache,
+                        generation_device,
+                        "code generation cache after feedback",
+                    )
                 feedback = build_feedback(
                     result,
                     include_compilation=self.cfg.include_compilation_feedback,
@@ -859,6 +1285,7 @@ class ConvCodeWorldLiveRunner:
                     "session_id": session_id,
                     "task_id": task_get(task, "task_id"),
                     "feedback_config": self.cfg.feedback_config,
+                    "benchmark_mode": self.cfg.benchmark_mode,
                     "iteration": iteration,
                     "predicted_answer": code,
                     "generated_code": code,
@@ -875,6 +1302,34 @@ class ConvCodeWorldLiveRunner:
                     "metric_excluded": False,
                 }
                 rows.append(row)
+                logger.info(
+                    "Finished task %s iteration %s in %.1fs: status=%s passed=%s cache=%s->%s",
+                    task_get(task, "task_id"),
+                    iteration,
+                    time.perf_counter() - iter_start,
+                    result.status,
+                    result.passed,
+                    cache_before,
+                    cache_after,
+                )
+                if not result.passed:
+                    logger.debug(
+                        "Task %s iteration %s execution details:\n"
+                        "  generated (first 300): %s\n"
+                        "  code (first 300): %s\n"
+                        "  compilation: %s\n"
+                        "  execution: %s\n"
+                        "  stdout: %s\n"
+                        "  stderr: %s",
+                        task_get(task, "task_id"),
+                        iteration,
+                        repr(generated[:300]),
+                        repr(code[:300]),
+                        result.compilation_feedback[:500],
+                        result.execution_feedback[:500],
+                        result.stdout[:500],
+                        result.stderr[:500],
+                    )
 
                 if result.passed and self.cfg.early_stop_on_pass:
                     _append_after_pass_rows(
@@ -886,6 +1341,143 @@ class ConvCodeWorldLiveRunner:
                         cache_len=cache_after,
                     )
                     break
+
+        return rows
+
+    def _run_task_static(
+        self,
+        model,
+        tokenizer,
+        task: dict[str, Any],
+        reference_trajectories: dict[str, list[dict[str, Any]]],
+        global_press: TurnAwareGlobalPress | None,
+        scorer: ScorerPress | None,
+    ) -> list[dict[str, Any]]:
+        cache = DynamicCache()
+        rows: list[dict[str, Any]] = []
+        task_id = str(task_get(task, "task_id"))
+        session_id = f"{self.cfg.feedback_config}/{task_id}"
+        reference_turns = reference_trajectories.get(task_id)
+        if not reference_turns:
+            logger.warning("No ConvCodeWorld reference trajectory for %s; skipping", task_id)
+            return rows
+
+        context_manager = global_press(model) if global_press is not None else torch.inference_mode()
+        with context_manager:
+            if global_press is not None:
+                global_press.on_turn_start(0, "context", cache.get_seq_length())
+            context_start = cache.get_seq_length()
+            _prefill_text(
+                model,
+                tokenizer,
+                cache,
+                _initial_context(task, self.cfg, tokenizer),
+                max_tokens=self.cfg.max_input_tokens,
+            )
+            if global_press is not None:
+                global_press.on_turn_end(0, "context", context_start, cache.get_seq_length())
+
+            feedback = ""
+            for iteration, reference_turn in enumerate(reference_turns[: self.cfg.max_turns], start=1):
+                iter_start = time.perf_counter()
+                logger.info("Starting static task %s iteration %s", task_id, iteration)
+                prompt = _revision_prompt(iteration, feedback)
+                prompt_ids = _encode(tokenizer, prompt)
+                if global_press is not None:
+                    global_press.on_turn_start(iteration, "user", cache.get_seq_length())
+                user_start = cache.get_seq_length()
+
+                answer_start = cache.get_seq_length() + len(prompt_ids)
+                decode_press = None
+                if (
+                    not self.cfg.full_kv_cache
+                    and scorer is not None
+                    and self.cfg.max_new_tokens > self.cfg.local_budget
+                ):
+                    decode_press = AnswerSuffixDecodingPress(
+                        base_press=scorer,
+                        answer_start_seq_len=answer_start,
+                        compression_interval=self.cfg.decode_compression_interval,
+                        target_size=self.cfg.local_budget,
+                        hidden_states_buffer_size=self.cfg.decode_hidden_states_buffer_size,
+                    )
+                generated = _generate_after_prompt(
+                    model,
+                    tokenizer,
+                    cache,
+                    prompt,
+                    max_new_tokens=self.cfg.max_new_tokens,
+                    decode_press=decode_press,
+                    prompt_ids=prompt_ids,
+                    require_flashdecode=self.cfg.require_flashdecode,
+                )
+                user_end = answer_start
+                if global_press is not None:
+                    global_press.on_turn_end(iteration, "user", user_start, user_end)
+
+                code = extract_code(generated)
+                result = run_candidate(
+                    task,
+                    code,
+                    timeout_s=self.cfg.executor_timeout_s,
+                    memory_mb=self.cfg.executor_memory_mb,
+                    network_isolation=self.cfg.network_isolation,
+                    work_dir="/tmp",
+                )
+
+                _truncate_cache(cache, user_end)
+                if global_press is not None:
+                    global_press.on_turn_start(iteration, "assistant", cache.get_seq_length())
+                assistant_start = cache.get_seq_length()
+                _prefill_text(
+                    model,
+                    tokenizer,
+                    cache,
+                    _reference_answer_text(str(reference_turn.get("previous_code") or "")),
+                )
+                if global_press is not None:
+                    global_press.on_turn_end(iteration, "assistant", assistant_start, cache.get_seq_length())
+
+                feedback = _reference_feedback(reference_turn, self.cfg)
+                cache_before = cache.get_seq_length()
+                _maybe_global_compress(model, cache, global_press, self.global_target)
+                cache_after = cache.get_seq_length()
+                rows.append(
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "feedback_config": self.cfg.feedback_config,
+                        "benchmark_mode": self.cfg.benchmark_mode,
+                        "iteration": iteration,
+                        "predicted_answer": code,
+                        "generated_code": code,
+                        "raw_generation": generated,
+                        "passed": result.passed,
+                        "reference_label": reference_turn.get("label"),
+                        "reference_code": reference_turn.get("previous_code"),
+                        "status": result.status,
+                        "compilation_feedback": result.compilation_feedback,
+                        "execution_feedback": result.execution_feedback,
+                        "reference_compilation_feedback": reference_turn.get("compilation_feedback"),
+                        "reference_execution_feedback": reference_turn.get("execution_feedback"),
+                        "reference_verbal_feedback": reference_turn.get("verbal_feedback"),
+                        "feedback": feedback,
+                        "cache_len_before_global": cache_before,
+                        "cache_len_after_global": cache_after,
+                        "skipped_after_pass": False,
+                        "metric_excluded": False,
+                    }
+                )
+                logger.info(
+                    "Finished static task %s iteration %s in %.1fs: status=%s passed=%s cache=%s->%s",
+                    task_id,
+                    iteration,
+                    time.perf_counter() - iter_start,
+                    result.status,
+                    result.passed,
+                    cache_before,
+                    cache_after,
+                )
 
         return rows
 
@@ -902,6 +1494,18 @@ def run(config: ConvCodeWorldLiveConfig | None = None, config_file: Optional[str
     env_model = os.environ.get("KV_PRESS_CONVCODEWORLD_MODEL", "").strip()
     if env_model:
         args["model"] = env_model
+    env_feedback_model = os.environ.get("KV_PRESS_CONVCODEWORLD_FEEDBACK_MODEL", "").strip()
+    if env_feedback_model:
+        args["feedback_model"] = env_feedback_model
+    env_attn_implementation = os.environ.get("KV_PRESS_CONVCODEWORLD_ATTN_IMPLEMENTATION", "").strip()
+    if env_attn_implementation:
+        args["attn_implementation"] = env_attn_implementation
+    env_feedback_attn_implementation = os.environ.get(
+        "KV_PRESS_CONVCODEWORLD_FEEDBACK_ATTN_IMPLEMENTATION",
+        "",
+    ).strip()
+    if env_feedback_attn_implementation:
+        args["feedback_attn_implementation"] = env_feedback_attn_implementation
     cfg_kwargs = {k: v for k, v in args.items() if k in ConvCodeWorldLiveConfig.__dataclass_fields__}
     cfg = ConvCodeWorldLiveConfig(**cfg_kwargs)
     ConvCodeWorldLiveRunner(cfg).run()
