@@ -125,13 +125,16 @@ def test_role_boundary_assistant_last_only():
     assert torch.all(w_user[17:20] == 1.0), "user tail anchor must be 1.0"
     assert torch.all(w_user[3:17] == 0.0), "user interior must be 0"
 
-    # Feedback follows the assistant rule (ADR 002 §2)
+    # role="feedback" is accepted by TurnBoundary (VALID_ROLES) but the
+    # current ConvCodeWorld driver embeds feedback in the next iteration's
+    # user prompt rather than emitting a dedicated span, so this policy
+    # no longer special-cases it. A feedback span therefore receives no
+    # anchors. If a future loader begins emitting role="feedback" spans,
+    # restore an assistant-like last-w branch and update this assertion.
     fb_press = RoleBoundaryAnchorPress()
     fb_press.on_turn_end(turn_idx=1, role="feedback", start_kv=0, end_kv=20)
     w_fb = fb_press.compute_weights(kv_len=20)
-    assert torch.all(w_fb[17:20] == 1.0) and torch.all(w_fb[0:3] == 0.0), (
-        "feedback role must mirror assistant (last-w only)"
-    )
+    assert torch.all(w_fb == 0.0), "unhandled role must receive no anchors"
 
     # Context is skipped (KEEP bucket per ADR 001 §0)
     ctx_press = RoleBoundaryAnchorPress()

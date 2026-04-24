@@ -22,14 +22,20 @@ class RoleBoundaryAnchorPress(TurnAwareMixin):
 
         w = max(min_anchor_tokens, floor(beta * |span|))
 
-    and the reserved positions are, per ADR 002 §2:
+    and the reserved positions are:
 
     - ``role == "user"``: first ``w`` and last ``w`` positions (intent head +
       full-request tail).
-    - ``role == "assistant"`` or ``role == "feedback"``: last ``w`` positions
-      only (assistant openings tend to be boilerplate).
+    - ``role == "assistant"``: last ``w`` positions only (openings tend to
+      be boilerplate).
     - ``role == "context"`` (turn_idx 0): skipped -- context is the KEEP
       bucket per ADR 001 §0 and must not be in the compression surface.
+    - ``role == "feedback"`` is accepted by ``TurnBoundary`` for forward
+      compatibility but is never emitted by the current ConvCodeWorld
+      driver (feedback text lives inside the next iteration's user prompt
+      rather than in its own span), so this policy does not special-case
+      it. Re-introduce an assistant-like branch if a future loader begins
+      emitting role="feedback".
 
     This is a per-span operation, not per-turn: because the harness emits a
     separate boundary for each role within a turn, a user+assistant turn
@@ -40,10 +46,10 @@ class RoleBoundaryAnchorPress(TurnAwareMixin):
 
     For very short spans where ``2 * w > |span|``, the "first w" and "last w"
     windows overlap and their union is the full span. In that degenerate
-    case all span positions get weight 1.0 for user turns; for assistant /
-    feedback only the last ``w`` are set (even if that covers the whole
-    span). Tests should use spans of length ``>= 2 * min_anchor_tokens`` to
-    unambiguously exercise "first w == 0" behaviour.
+    case all span positions get weight 1.0 for user turns; for assistant
+    only the last ``w`` are set (even if that covers the whole span). Tests
+    should use spans of length ``>= 2 * min_anchor_tokens`` to unambiguously
+    exercise "first w == 0" behaviour.
 
     This class inherits ``TurnAwareMixin`` only; it does not evict, register
     hooks, or call the base scorer. It produces a shape-``(kv_len,)`` binary
@@ -109,8 +115,13 @@ class RoleBoundaryAnchorPress(TurnAwareMixin):
                 tail_start = max(span_end - w, span_start)
                 weights[span_start:head_end] = 1.0
                 weights[tail_start:span_end] = 1.0
-            elif b.role in ("assistant", "feedback"):
+            elif b.role == "assistant":
                 tail_start = max(span_end - w, span_start)
                 weights[tail_start:span_end] = 1.0
+            # role=="feedback" is never emitted by live_loop.py's static-replay
+            # or live-loop driver -- feedback text is embedded in the next
+            # iteration's user prompt rather than allocated its own span --
+            # so there is no branch here. If a future loader starts emitting
+            # role="feedback", re-introduce assistant-like tail handling.
 
         return weights

@@ -63,7 +63,27 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 DEFAULT_FEEDBACK_MODEL = "google/gemma-3-4b-it"
-DEFAULT_STOP_SEQUENCES = ("\n```\n", "\n### Feedback", "\n### Iteration")
+# Stop sequences are last-resort guards. The primary stop signal is the
+# tokenizer's EOS/EOT token, which chat-template prompting causes the model
+# to emit naturally at the end of an assistant turn. These literal patterns
+# match observed DeepSeek-R1-Distill-Llama-8B degenerate outputs where the
+# model (a) closes a code fence but keeps talking, (b) hallucinates future
+# iterations in the format our old raw-text prompts used, or (c) fakes its
+# own feedback transcript. Adding them costs nothing because they only fire
+# when EOS/EOT did not, and they short-circuit runs that would otherwise
+# burn tokens on garbage.
+DEFAULT_STOP_SEQUENCES = (
+    "\n```\n",
+    "```\n\n",
+    "\n### Iteration",
+    "\n###Iteration",
+    "\nExecutionFeedback:",
+    "\nUserFeedback:",
+    "\nCompilationFeedback:",
+    "<｜User｜>",
+    "<｜end▁of▁sentence｜>",
+    "<|eot_id|>",
+)
 
 
 @dataclass
@@ -103,7 +123,11 @@ class ConvCodeWorldLiveConfig:
     include_verbal_feedback: bool = True
     user_expertise: str = "novice"
     max_turns: int = 10
-    max_new_tokens: int = 1024
+    # 512 accommodates typical BigCodeBench solutions (<=~400 tokens of code)
+    # without leaving a runaway budget for R1-Distill's reasoning to hallucinate
+    # fake future iterations after it finishes the real code. Bump back to
+    # 1024 if a task genuinely needs more tokens.
+    max_new_tokens: int = 512
     verbal_feedback_max_new_tokens: int = 256
     num_eval_examples: int = 1
     fraction: float = 1.0
@@ -126,7 +150,14 @@ class ConvCodeWorldLiveConfig:
     executor_timeout_s: int = 30
     executor_memory_mb: int = 1024
     network_isolation: str = "auto"
-    cot: bool = True
+    # CoT defaults to False: DeepSeek-R1-Distill-Llama-8B (the default model)
+    # has reasoning trained into its chat template's <think>...</think> block
+    # already; adding an external "think through the feedback" clause to the
+    # prompt causes double-reasoning that consumes max_new_tokens with
+    # meta-commentary and yields broken/truncated code (see commit writeup).
+    # ADR 002 §1 also specifies CoT off-by-default on every benchmark; this
+    # resolves the contradiction with ADR 001 §4.
+    cot: bool = False
 
 
 def _git_revision() -> str:
@@ -763,7 +794,43 @@ def _generate_after_prompt(
     return _decode_token_ids(tokenizer, generated_ids)
 
 
+# Llama-3.1 chat-template tokens. DeepSeek-R1-Distill-Llama-8B inherits them
+# verbatim; so does meta-llama/Meta-Llama-3.1-8B-Instruct. ``_assert_llama3_tokenizer``
+# guards at setup time so a surprise tokenizer (Qwen3, DeepSeek-V3 original)
+# fails loudly rather than silently producing garbage.
+_LLAMA3_USER_OPEN = "<|start_header_id|>user<|end_header_id|>\n\n"
+_LLAMA3_ASSISTANT_OPEN = "<|start_header_id|>assistant<|end_header_id|>\n\n"
+_LLAMA3_SYSTEM_OPEN = "<|start_header_id|>system<|end_header_id|>\n\n"
+_LLAMA3_TURN_END = "<|eot_id|>"
+_LLAMA3_BOS_FALLBACK = "<|begin_of_text|>"
+
+
+def _assert_llama3_tokenizer(tokenizer, model_name: str) -> None:
+    """Verify the tokenizer recognises the Llama-3.1 chat-template markers
+    used by _initial_context / _revision_prompt / _reference_answer_text.
+    Raises RuntimeError if any required special token is missing, pointing
+    the caller at the two supported model families.
+    """
+    vocab = set(tokenizer.get_vocab().keys())
+    required = {_LLAMA3_TURN_END, "<|start_header_id|>", "<|end_header_id|>"}
+    missing = sorted(required - vocab)
+    if missing:
+        raise RuntimeError(
+            f"tokenizer for {model_name!r} is missing Llama-3.1 chat markers {missing}. "
+            "live_loop.py's prompt construction currently hardcodes Llama-3.1-style tokens; "
+            "supported model families are Llama-3.1-Instruct and "
+            "DeepSeek-R1-Distill-Llama. Use one of those, or generalise "
+            "_revision_prompt to use tokenizer.apply_chat_template."
+        )
+
+
 def _initial_context(task: dict[str, Any], cfg: ConvCodeWorldLiveConfig, tokenizer) -> str:
+    """Return the chat-template-formatted opening: BOS + system + first user
+    turn (closed with EOT). The assistant opener is emitted by
+    ``_revision_prompt(1, "")`` so every iteration -- including the first --
+    uniformly prefixes its generation with an assistant-turn header, and
+    the generate loop always has non-empty prompt tokens to drive.
+    """
     prompt = (
         task_get(task, "instruct_prompt")
         or task_get(task, "complete_prompt")
@@ -771,25 +838,44 @@ def _initial_context(task: dict[str, Any], cfg: ConvCodeWorldLiveConfig, tokeniz
         or task_get(task, "code_prompt")
         or ""
     )
-    cot = "\nThink through the feedback before writing code.\n" if cfg.cot else ""
-    bos = tokenizer.bos_token or ""
+    system_body = (
+        "You are a Python coding assistant solving a programming task over multiple "
+        "refinement turns. Each assistant reply MUST be a single ```python ... ``` "
+        "fenced block containing the complete solution function. Do not include "
+        "explanations, pseudocode, or commentary outside the code fence."
+    )
+    if cfg.cot:
+        # Opt-in CoT. Off by default -- see ConvCodeWorldLiveConfig.cot.
+        system_body += " Think through the feedback briefly before writing the code."
+    user_body = f"Task:\n{prompt}"
+    bos = tokenizer.bos_token or _LLAMA3_BOS_FALLBACK
     return (
-        f"{bos}You are solving a Python programming task over multiple refinement turns.\n"
-        "Return complete Python code when asked for a revision. Do not include explanations outside the code block.\n"
-        f"{cot}\n### Task\n{prompt}\n"
+        f"{bos}"
+        f"{_LLAMA3_SYSTEM_OPEN}{system_body}{_LLAMA3_TURN_END}"
+        f"{_LLAMA3_USER_OPEN}{user_body}{_LLAMA3_TURN_END}"
     )
 
 
 def _revision_prompt(iteration: int, feedback: str) -> str:
+    """Return the continuation text to prefill at the start of iter ``iteration``.
+
+    iter 1: the initial_context ended at ``<|eot_id|>`` closing the first
+    user turn. This returns just the assistant opener so the model starts
+    producing code immediately.
+
+    iter k>1: closes the previous assistant turn (``<|eot_id|>``), opens a
+    new user turn carrying the feedback body, closes it, and opens the new
+    assistant turn. Leading ``<|eot_id|>`` is harmless even if the prior
+    turn already ended with one (the model treats consecutive EOTs as
+    redundant turn separators, not content).
+    """
     if iteration == 1:
-        body = "No previous candidate exists. Write the initial solution."
-    else:
-        body = feedback or "No new feedback was provided. Keep the solution correct and complete."
+        return _LLAMA3_ASSISTANT_OPEN
+    body = feedback or "No new feedback was provided. Keep the solution correct and complete."
     return (
-        f"\n### Iteration {iteration}\n"
-        f"{body}\n\n"
-        "Return only the revised complete Python code.\n"
-        "```python\n"
+        f"{_LLAMA3_TURN_END}"
+        f"{_LLAMA3_USER_OPEN}{body}{_LLAMA3_TURN_END}"
+        f"{_LLAMA3_ASSISTANT_OPEN}"
     )
 
 
@@ -938,7 +1024,14 @@ def _reference_feedback(turn: dict[str, Any], cfg: ConvCodeWorldLiveConfig) -> s
 
 
 def _reference_answer_text(code: str) -> str:
-    return f"{extract_code(code)}\n```\n"
+    """Assistant-turn body for Mode 2 teacher-forced prefill. Wraps the
+    reference code in a ```python fence matching the model's expected
+    output format. The turn-end marker (``<|eot_id|>``) is NOT appended
+    here -- the next iteration's ``_revision_prompt`` prepends one
+    unconditionally, so adding it here would double-emit EOT.
+    """
+    clean = extract_code(code).strip()
+    return f"```python\n{clean}\n```"
 
 
 def _truncate_cache(cache: DynamicCache, seq_len: int) -> None:
@@ -1078,6 +1171,12 @@ class ConvCodeWorldLiveRunner:
 
     def setup_models(self):
         model, tokenizer = self._load_model(self.cfg.model, self.cfg.attn_implementation)
+        # Prompt construction (_initial_context / _revision_prompt /
+        # _reference_answer_text) hardcodes Llama-3.1 chat-template markers.
+        # Verify up-front that the loaded tokenizer understands them; a
+        # surprise tokenizer (e.g. Qwen3, Mistral, DeepSeek-V3 original) would
+        # produce garbage prefills and 0% Pass@1 without this guard.
+        _assert_llama3_tokenizer(tokenizer, self.cfg.model)
         if self.cfg.benchmark_mode == "static":
             return model, tokenizer, None, None
         if not self.cfg.include_verbal_feedback:
