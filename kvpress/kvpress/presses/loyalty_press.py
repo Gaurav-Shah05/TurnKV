@@ -66,6 +66,17 @@ class LoyaltyPress(TurnAwareMixin):
     top_p : float, default=0.25
         Fraction of past keys per query that count as "attended to". Must
         satisfy ``0 < top_p <= 1``. ADR 001 §3-C fixes this at 25%.
+    update_every : int, default=5
+        Decode-step subsampling factor. ``update_loyalty`` runs every
+        Nth call PER LAYER during decode (``q_len == 1``); prefill
+        (``q_len > 1``) always runs since it is high-signal-per-call.
+        ``update_every=1`` disables subsampling. Higher N reduces the
+        attention-recompute overhead inside ``update_loyalty`` linearly
+        in 1/N at the cost of higher variance in counts (rankings
+        preserved in expectation since sampling is uniform). Empirically
+        N=5 brings turnkv_snapkv close to plain snapkv per-iter
+        wall-clock without changing relative loyalty rankings on
+        ConvCodeWorld scale.
 
     Notes
     -----
@@ -79,6 +90,7 @@ class LoyaltyPress(TurnAwareMixin):
     """
 
     top_p: float = 0.25
+    update_every: int = 5
 
     # Start-of-current-turn cache offset, set in on_turn_start. Everything
     # at cache positions < _current_turn_start_kv is "past-turn" and
@@ -90,8 +102,13 @@ class LoyaltyPress(TurnAwareMixin):
     # outruns current capacity (rare after the first few turns).
     _loyalty_counts: Optional[torch.Tensor] = field(default=None, init=False, repr=False)
 
+    # Per-layer counter of decode-step calls. Used to subsample at rate
+    # 1/update_every during decode (q_len==1). Reset between sessions.
+    _decode_step_counter: dict = field(default_factory=dict, init=False, repr=False)
+
     def __post_init__(self):
         assert 0 < self.top_p <= 1, f"top_p must be in (0, 1], got {self.top_p}"
+        assert self.update_every >= 1, f"update_every must be >= 1, got {self.update_every}"
 
     def on_turn_start(self, turn_idx: int, role: str, start_kv: int) -> None:
         super().on_turn_start(turn_idx, role, start_kv)
@@ -101,6 +118,7 @@ class LoyaltyPress(TurnAwareMixin):
         super().reset_turn_state()
         self._current_turn_start_kv = 0
         self._loyalty_counts = None
+        self._decode_step_counter = {}
 
     def _ensure_counts_capacity(self, min_size: int, device: torch.device) -> None:
         """Allocate / grow ``_loyalty_counts`` to fit at least ``min_size``
@@ -138,6 +156,18 @@ class LoyaltyPress(TurnAwareMixin):
         q_len = hidden_states.shape[1]
         if q_len == 0:
             return
+
+        # Decode-step subsampling: only every Nth call per layer during
+        # decode (q_len == 1). Prefill is always processed -- it's the
+        # high-signal-per-call case (multi-token forward in one shot)
+        # and skipping it would bias the loyalty estimator toward
+        # decode-only attention patterns.
+        if q_len == 1 and self.update_every > 1:
+            layer_idx = getattr(module, "layer_idx", id(module))
+            step = self._decode_step_counter.get(layer_idx, 0)
+            self._decode_step_counter[layer_idx] = step + 1
+            if step % self.update_every != 0:
+                return
 
         # query_turn_idx is advertised in ADR 001 §4 for the caller to
         # declare which turn the query rows belong to; the current-turn

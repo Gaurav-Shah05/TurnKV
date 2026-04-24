@@ -114,6 +114,7 @@ class ConvCodeWorldLiveConfig:
     anchor_beta: Optional[float] = None
     floor_gamma: Optional[float] = None
     loyalty_top_p: Optional[float] = None
+    loyalty_update_every: Optional[int] = None
     alpha_floor_len: Optional[float] = None
     min_floor_tokens: Optional[int] = None
     feedback_config: str = "CF_EF_UNIT_SNF"
@@ -412,6 +413,7 @@ def _has_turn_aware_overrides(cfg: ConvCodeWorldLiveConfig) -> bool:
             "anchor_beta",
             "floor_gamma",
             "loyalty_top_p",
+            "loyalty_update_every",
             "alpha_floor_len",
             "min_floor_tokens",
         )
@@ -422,7 +424,7 @@ def _policy_requested(cfg: ConvCodeWorldLiveConfig, name: str) -> bool:
     names = {
         "floor": ("alpha_floor", "floor_gamma", "alpha_floor_len", "min_floor_tokens"),
         "anchor": ("alpha_anchor", "anchor_beta"),
-        "loyalty": ("alpha_loyalty", "loyalty_top_p"),
+        "loyalty": ("alpha_loyalty", "loyalty_top_p", "loyalty_update_every"),
     }[name]
     return any(getattr(cfg, field_name) is not None for field_name in names)
 
@@ -434,6 +436,8 @@ def _validate_turn_aware_overrides(cfg: ConvCodeWorldLiveConfig) -> None:
         raise ValueError(f"floor_gamma must be in (0, 1], got {cfg.floor_gamma}")
     if cfg.loyalty_top_p is not None and not 0 < cfg.loyalty_top_p <= 1:
         raise ValueError(f"loyalty_top_p must be in (0, 1], got {cfg.loyalty_top_p}")
+    if cfg.loyalty_update_every is not None and cfg.loyalty_update_every < 1:
+        raise ValueError(f"loyalty_update_every must be >= 1, got {cfg.loyalty_update_every}")
     if cfg.alpha_floor_len is not None and cfg.alpha_floor_len < 0:
         raise ValueError(f"alpha_floor_len must be non-negative, got {cfg.alpha_floor_len}")
     if cfg.min_floor_tokens is not None and cfg.min_floor_tokens < 0:
@@ -481,8 +485,11 @@ def _configure_turn_aware_press(
         anchor.beta = cfg.anchor_beta
 
     loyalty = press.policies.get("loyalty")
-    if isinstance(loyalty, LoyaltyPress) and cfg.loyalty_top_p is not None:
-        loyalty.top_p = cfg.loyalty_top_p
+    if isinstance(loyalty, LoyaltyPress):
+        if cfg.loyalty_top_p is not None:
+            loyalty.top_p = cfg.loyalty_top_p
+        if cfg.loyalty_update_every is not None:
+            loyalty.update_every = cfg.loyalty_update_every
 
 
 def _setup_press(cfg: ConvCodeWorldLiveConfig) -> BasePress | None:
@@ -655,6 +662,7 @@ def _results_dir(cfg: ConvCodeWorldLiveConfig) -> Path:
         "anchor_beta",
         "floor_gamma",
         "loyalty_top_p",
+        "loyalty_update_every",
         "alpha_floor_len",
         "min_floor_tokens",
     ):

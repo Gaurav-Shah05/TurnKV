@@ -255,6 +255,7 @@ def run_convcodeworld_live(
     anchor_beta: Optional[float] = None,
     floor_gamma: Optional[float] = None,
     loyalty_top_p: Optional[float] = None,
+    loyalty_update_every: Optional[int] = None,
     alpha_floor_len: Optional[float] = None,
     min_floor_tokens: Optional[int] = None,
     feedback_config: str = "CF_EF_UNIT_SNF",
@@ -355,6 +356,7 @@ def run_convcodeworld_live(
     _append_optional_flag(cmd, "anchor_beta", anchor_beta)
     _append_optional_flag(cmd, "floor_gamma", floor_gamma)
     _append_optional_flag(cmd, "loyalty_top_p", loyalty_top_p)
+    _append_optional_flag(cmd, "loyalty_update_every", loyalty_update_every)
     _append_optional_flag(cmd, "alpha_floor_len", alpha_floor_len)
     _append_optional_flag(cmd, "min_floor_tokens", min_floor_tokens)
     subprocess.check_call(cmd, env=env, cwd="/root/kvpress/evaluation")
@@ -393,6 +395,7 @@ def main(
     anchor_beta: Optional[float] = None,
     floor_gamma: Optional[float] = None,
     loyalty_top_p: Optional[float] = None,
+    loyalty_update_every: Optional[int] = None,
     alpha_floor_len: Optional[float] = None,
     min_floor_tokens: Optional[int] = None,
     feedback_config: str = "CF_EF_UNIT_SNF",
@@ -440,6 +443,7 @@ def main(
             anchor_beta=anchor_beta,
             floor_gamma=floor_gamma,
             loyalty_top_p=loyalty_top_p,
+            loyalty_update_every=loyalty_update_every,
             alpha_floor_len=alpha_floor_len,
             min_floor_tokens=min_floor_tokens,
             feedback_config=feedback_config,
