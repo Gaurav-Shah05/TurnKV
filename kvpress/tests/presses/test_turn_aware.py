@@ -237,7 +237,10 @@ def test_loyalty_updates_during_prefill(unit_test_model):  # noqa: F811
         unit_test_model(ids1, past_key_values=cache)
         turn1_end = cache.get_seq_length()
         press.on_turn_end(turn_idx=1, role="user", start_kv=0, end_kv=turn1_end)
-        assert loyalty.loyalty == {}, "turn 1 has no past -> no loyalty accrual"
+        # ``loyalty.loyalty_as_dict()`` rebuilds the dict view from the
+        # tensor counter. Returns {} when no positions have been scored,
+        # which is what we want here (turn 1 has no past to score against).
+        assert loyalty.loyalty_as_dict() == {}, "turn 1 has no past -> no loyalty accrual"
 
         # Turn 2: 20 tokens. All current-turn queries attend to turn 1's keys
         # (indices [0, turn1_end)). Top-25% positions should get loyalty += 1.
@@ -249,50 +252,118 @@ def test_loyalty_updates_during_prefill(unit_test_model):  # noqa: F811
         # Loyalty assertions must run INSIDE the context manager; the
         # composer's ``__call__`` runs ``reset()`` on exit (by design --
         # see turn_aware_global_press.py) which would clear loyalty.
-        assert len(loyalty.loyalty) > 0, "turn 2 prefill must have populated loyalty counters"
+        loyalty_dict = loyalty.loyalty_as_dict()
+        assert len(loyalty_dict) > 0, "turn 2 prefill must have populated loyalty counters"
         # update_loyalty fires once per layer per forward pass so a position
         # voted for in every layer gets count >= n_layers; require >= n_layers
         # on the maximum to prove all layers' hooks fired (not just one).
-        for pos, count in loyalty.loyalty.items():
+        for pos, count in loyalty_dict.items():
             assert 0 <= pos < turn1_end, f"loyalty key {pos} outside past-turn span [0, {turn1_end})"
             assert count > 0, f"loyalty count at {pos} must be positive, got {count}"
-        assert max(loyalty.loyalty.values()) >= n_layers, (
-            f"max loyalty ({max(loyalty.loyalty.values())}) < n_layers ({n_layers}); "
+        assert max(loyalty_dict.values()) >= n_layers, (
+            f"max loyalty ({max(loyalty_dict.values())}) < n_layers ({n_layers}); "
             "suggests forward_hook fired on only a subset of layers"
         )
 
     # After the context manager exits, reset() runs and clears all state.
-    assert loyalty.loyalty == {}, "reset() on __call__ exit must clear loyalty"
+    # The tensor counter is set back to None; loyalty_as_dict() returns {}.
+    assert loyalty.loyalty_as_dict() == {}, "reset() on __call__ exit must clear loyalty"
+    assert loyalty._loyalty_counts is None, "reset() must release the tensor counter"
 
 
 def test_budget_hit(unit_test_model):  # noqa: F811
-    """ADR 002 §7: ``run_global_compression(target=N)`` always exits with
-    ``cache.get_seq_length() == N``. Also spot-check the binary-search
-    helper on adversarial ``(k_len, target)`` pairs where naive
-    ``1 - target/k_len`` would truncate by one.
+    """ADR 002 §7, amended for per-turn budgeting: ``run_global_compression``
+    keeps cache length within ``target``. Unlike the earlier ratio-based
+    design, per-turn budgeting doesn't guarantee EXACT equality because
+    integer floor/rounding and per-turn clamping can leave small
+    headroom. The contract is:
+
+    - ``cache.get_seq_length() <= target`` (the global-budget cap).
+    - ``cache.get_seq_length() > 0`` (compression didn't emit the cache).
+
+    With two turns of 128 tokens each (plus no context) and target=100,
+    the formula ``base_floor = (100 - 0) / 2 * exp(-0.1 * (T-i))``
+    gives per-turn budgets ~45 and ~50. After the proportional cap they
+    sum to <= 100. Exact total depends on rounding; asserting the
+    range is sufficient.
     """
     device = unit_test_model.device
     torch.manual_seed(0)
 
+    # Need at least one policy for the composer to leave the all-alphas-zero
+    # short-circuit; use TurnFloorPress with alpha_floor=1.0 (the natural
+    # "floor-only" baseline for per-turn budget).
+    floor_press = TurnFloorPress(global_budget=100)
     press = TurnAwareGlobalPress(
         base_press=SnapKVPress(compression_ratio=0.0, window_size=16),
         global_budget=100,
-        policies={},
-        alphas={},
+        policies={"floor": floor_press},
+        alphas={"floor": 1.0},
     )
 
     cache = DynamicCache()
     with press(unit_test_model), torch.no_grad():
+        # Turn 1: 128 tokens
         press.on_turn_start(turn_idx=1, role="user", start_kv=0)
-        ids = torch.randint(0, 1024, (1, 256), device=device)
-        unit_test_model(ids, past_key_values=cache)
-        press.on_turn_end(turn_idx=1, role="user", start_kv=0, end_kv=256)
+        ids1 = torch.randint(0, 1024, (1, 128), device=device)
+        unit_test_model(ids1, past_key_values=cache)
+        press.on_turn_end(turn_idx=1, role="user", start_kv=0, end_kv=128)
+        # Turn 2: 128 tokens
+        press.on_turn_start(turn_idx=2, role="user", start_kv=128)
+        ids2 = torch.randint(0, 1024, (1, 128), device=device)
+        unit_test_model(ids2, past_key_values=cache)
+        press.on_turn_end(turn_idx=2, role="user", start_kv=128, end_kv=256)
         assert cache.get_seq_length() == 256
-        press.run_global_compression(unit_test_model, cache, target=100)
-        assert cache.get_seq_length() == 100, "target=100 must yield exactly 100 KV positions"
 
-    # Static adversarial coverage of the binary search itself
-    for k_len, target in [(104999, 4096), (131071, 8192), (100, 17), (7, 3), (65536, 32768)]:
-        ratio = TurnAwareGlobalPress._ratio_for_exact_target(k_len, target)
-        n_kept = int(k_len * (1 - ratio))
-        assert n_kept == target, f"binary search off by {target - n_kept} at k_len={k_len} target={target}"
+        press.run_global_compression(unit_test_model, cache, target=100)
+        result = cache.get_seq_length()
+        assert result <= 100, f"cache ({result}) must not exceed target (100)"
+        assert result > 0, "compression must not evict everything"
+        # Sanity: the floor-only formula with 2 turns should retain a
+        # non-trivial fraction -- allow broad bounds to be robust across
+        # integer rounding corners (exact value depends on gamma and cap).
+        assert result >= 40, f"cache ({result}) seems implausibly small for floor-only @ target=100"
+
+    # Regression guard for the no-turns path: TurnAwareGlobalPress with
+    # alphas={} and no on_turn_end calls must delegate to the stock base
+    # press, producing bit-identical evictions. (The all-alphas-zero
+    # short-circuit in compress() and the no-turns short-circuit both
+    # route here.)
+    layer0 = unit_test_model.model.layers[0].self_attn
+    layer0.rotary_emb = unit_test_model.model.rotary_emb
+
+    capture = {}
+
+    def cap_hook(_module, _input, kwargs, output):
+        capture["hidden_states"] = kwargs["hidden_states"].detach().clone()
+        capture["kwargs"] = dict(kwargs)
+        return output
+
+    handle = layer0.register_forward_hook(cap_hook, with_kwargs=True)
+    cache2 = DynamicCache()
+    torch.manual_seed(7)
+    ids = torch.randint(0, 1024, (1, 256), device=device)
+    with torch.no_grad():
+        unit_test_model(ids, past_key_values=cache2)
+    handle.remove()
+
+    keys = cache2.layers[0].keys
+    values = cache2.layers[0].values
+
+    stock = SnapKVPress(compression_ratio=0.5, window_size=16)
+    k_stock, v_stock = stock.compress(
+        layer0, capture["hidden_states"], keys.clone(), values.clone(), None, capture["kwargs"]
+    )
+
+    wrapped_notouch = TurnAwareGlobalPress(
+        base_press=SnapKVPress(compression_ratio=0.5, window_size=16),
+        global_budget=128,
+        policies={"floor": TurnFloorPress(global_budget=128)},
+        alphas={"floor": 1.0},
+    )
+    # NO on_turn_end calls -> turn_boundaries empty -> delegate to base
+    k_wrapped, v_wrapped = wrapped_notouch.compress(
+        layer0, capture["hidden_states"], keys.clone(), values.clone(), None, capture["kwargs"]
+    )
+    assert torch.equal(k_stock, k_wrapped), "no-turns short-circuit must match base-press keys"
+    assert torch.equal(v_stock, v_wrapped), "no-turns short-circuit must match base-press values"

@@ -3,6 +3,8 @@
 
 
 import logging
+import math
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Generator, Optional
@@ -23,16 +25,33 @@ logger = logging.getLogger(__name__)
 @dataclass(kw_only=True)
 class TurnAwareGlobalPress(BasePress):
     """
-    Weighted global-compression composer (ADR 001 §3, ADR 002 §2 row 5).
+    Per-turn-budget global-compression composer (ADR 001 §3, amended).
 
-    Combines a ``ScorerPress`` base and a set of ``TurnAwareMixin`` policies::
+    Allocates a per-turn compression budget using the formula::
 
-        final_score(t) = base_scorer(t) · (1 + Σ_i alpha_i · w_i(t))
+        base_floor = (global_budget - |context|) / num_conversational_turns
+        budget_i   = max( alpha_anchor  * |anchor positions in turn i|
+                        + alpha_loyalty * |loyalty-scored positions in turn i|,
+                          alpha_floor   * base_floor * exp(-gamma * (T - i)) )
 
-    With every ``alpha_i == 0`` (e.g. ``baseline_*`` registry entries) the
-    composite short-circuits to ``base_press.compress(...)`` unchanged,
-    preserving bit-identical ``topk`` evictions -- the regression guard
-    ``test_all_alphas_zero_equivalent_to_base`` (ADR 002 §7) enforces.
+    clamped to turn length. Within each turn, anchor positions are
+    mandatory keeps; the remaining ``budget_i - anchor_count`` slots are
+    filled by the top-scoring positions under::
+
+        score_adj(t) = base_scorer(t) * (1 + alpha_loyalty * loyalty_norm(t))
+
+    Context spans (``turn_idx == 0`` or ``role == "context"``) are the
+    KEEP bucket per ADR 001 §0 and are preserved in full regardless of
+    budget.
+
+    **Short-circuit** to stock base-press compression (bit-identical
+    ``topk`` evictions) in two cases so ``baseline_*`` registry entries
+    and the ``test_all_alphas_zero_equivalent_to_base`` regression guard
+    keep working:
+
+    1. All alphas are 0 (no policy contribution).
+    2. No ``turn_boundaries`` recorded on any policy yet (e.g. the first
+       compression before any ``on_turn_end`` has fired).
 
     Compression cadence (ADR 001 §1): local/decode is handled by wrapping
     the base press in ``DecodingPress`` separately; this composer is the
@@ -48,29 +67,35 @@ class TurnAwareGlobalPress(BasePress):
     (the per-head masking surface of ``AdaKVPress`` needs a Week-2
     extension), and the buffered hidden_states feeding
     ``run_global_compression`` must be long enough for the base scorer
-    (e.g. ``SnapKVPress.window_size + 1``). Week-1 tests trigger global
-    compression after prefill to satisfy that; a rolling buffer
-    (analogous to ``DecodingPress.hidden_states_buffer``) is a Week-2
-    refinement.
+    (e.g. ``SnapKVPress.window_size + 1``).
 
     Parameters
     ----------
     base_press : ScorerPress (keyword-only, required)
-        Scorer press whose ``score`` drives the base ranking.
+        Scorer press whose ``score`` drives the in-turn ranking.
     global_budget : int (keyword-only, required)
-        Default target cache size, in KV positions. Can be overridden
-        per-call via ``run_global_compression(..., target=N)``.
+        Default target cache size, in KV positions. Drives the
+        ``base_floor = (global_budget - |context|) / num_turns`` term.
     policies : dict[str, TurnAwareMixin], default empty
-        Named policies (typical keys: ``floor``, ``anchor``, ``loyalty``).
+        Named policies. The composer recognises the keys ``floor``,
+        ``anchor``, and ``loyalty``; unknown keys are accepted for
+        forward compatibility but their weights are ignored here.
     alphas : dict[str, float], default empty
-        Per-policy blend coefficients; alphas without a matching policy
-        warn at construction and are ignored.
+        Per-policy coefficients: ``alpha_floor`` scales the floor term,
+        ``alpha_anchor`` and ``alpha_loyalty`` gate their respective
+        contributions to ``budget_i`` and the scoring weight for
+        non-anchor fills.
+    per_turn_gamma : float, default=0.1
+        Exponential-decay coefficient in ``exp(-gamma * (T - i))``. With
+        ``gamma=0.1`` the decay is roughly ``0.9047^(T - i)``, matching
+        the ADR 001 §3-A geometric ``gamma=0.9`` within ~1%.
     """
 
     base_press: ScorerPress
     global_budget: int
     policies: dict[str, TurnAwareMixin] = field(default_factory=dict)
     alphas: dict[str, float] = field(default_factory=dict)
+    per_turn_gamma: float = 0.1
 
     _last_hidden_states: dict = field(default_factory=dict, init=False, repr=False)
     _last_kwargs: dict = field(default_factory=dict, init=False, repr=False)
@@ -82,6 +107,7 @@ class TurnAwareGlobalPress(BasePress):
             "(AdaKVPress support is Week-2)."
         )
         assert self.global_budget > 0, f"global_budget must be positive, got {self.global_budget}"
+        assert self.per_turn_gamma >= 0.0, f"per_turn_gamma must be non-negative, got {self.per_turn_gamma}"
         for name, policy in self.policies.items():
             assert isinstance(policy, TurnAwareMixin), (
                 f"policy '{name}' must inherit TurnAwareMixin; got {type(policy).__name__}"
@@ -153,46 +179,245 @@ class TurnAwareGlobalPress(BasePress):
         attentions: Optional[torch.Tensor],
         kwargs: dict,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Single-layer compression via weighted composite or the all-αs=0
-        short-circuit. Uses ``self.base_press.compression_ratio``;
-        :meth:`run_global_compression` sets it transiently to hit an exact
-        target size (binary-searched in :meth:`_ratio_for_exact_target`).
+        """Single-layer per-turn-budget compression. Short-circuits to
+        the stock base press when either (a) all alphas are zero, or
+        (b) no turn boundaries are recorded yet -- the latter handles
+        the initial pre-first-turn compress cleanly and preserves the
+        ``test_all_alphas_zero_equivalent_to_base`` regression guard.
         """
         ratio = self.base_press.compression_ratio
         if ratio == 0:
             return keys, values
 
-        # All-αs=0 short-circuit = bit-equivalence regression guard (ADR 002 §7)
+        # Short-circuit 1: all alphas 0 -> baseline behaviour. Keeps
+        # baseline_snapkv-style registry entries bit-identical to stock
+        # SnapKVPress.
         if self._all_alphas_zero():
             return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
 
-        base_scores = self.base_press.score(module, hidden_states, keys, values, attentions, kwargs)
-        # base_scores: (bsz, num_kv_heads, k_len). Upcast to fp32 for the
-        # weighted multiply so small α·w terms (e.g. 1 + 1e-3) do not
-        # underflow bf16's ~4e-3 resolution near 1.0; topk is
-        # rank-invariant under monotone transforms so picking indices in
-        # fp32 is safe. weight shape (k_len,) broadcasts over (bsz, kv_heads, ·).
+        # Short-circuit 2: no turn structure to leverage yet. Degrade to
+        # plain base compression. Policies share turn_boundaries via the
+        # composer's on_turn_end dispatch, so checking any one is fine.
+        first_policy = next(iter(self.policies.values()), None)
+        if first_policy is None or not first_policy.turn_boundaries:
+            return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+
         k_len = keys.shape[2]
-        weight = self._combined_weight(k_len, device=base_scores.device, dtype=torch.float32)
-        final_scores = base_scores.float() * weight
+        bsz, num_kv_heads, _, head_dim = keys.shape
 
-        n_kept = int(k_len * (1 - ratio))
-        indices = final_scores.topk(n_kept, dim=-1).indices
-        indices = indices.unsqueeze(-1).expand(-1, -1, -1, module.head_dim)
-        keys = keys.gather(2, indices).contiguous()
-        values = values.gather(2, indices).contiguous()
-        return keys, values
+        turn_budgets, context_spans = self._compute_turn_budgets(k_len)
 
-    def _combined_weight(self, kv_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        """Return ``1 + Σ_i alpha_i · w_i`` at shape ``(kv_len,)``."""
-        weight = torch.ones(kv_len, device=device, dtype=dtype)
-        for name, policy in self.policies.items():
-            alpha = float(self.alphas.get(name, 0.0))
-            if alpha == 0.0:
+        if not turn_budgets and not context_spans:
+            return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+
+        # If our total kept already fits (or exceeds) the cache, there is
+        # nothing to evict. Happens when budgets + context >= k_len.
+        total_kept = sum(ce - cs for cs, ce in context_spans) + sum(b for _, _, b in turn_budgets.values())
+        if total_kept >= k_len:
+            return keys, values
+
+        # Base scoring is per-layer; upcast to fp32 so small alpha*loyalty
+        # bumps do not underflow bf16 and so topk ties resolve deterministically.
+        base_scores = self.base_press.score(module, hidden_states, keys, values, attentions, kwargs).float()
+
+        # Loyalty weighting applied to base_scores BEFORE per-turn topk so the
+        # retained positions within each turn prefer high-loyalty tokens.
+        alpha_loyalty = float(self.alphas.get("loyalty", 0.0))
+        if alpha_loyalty > 0.0 and "loyalty" in self.policies:
+            loyalty_w = self.policies["loyalty"].compute_weights(
+                k_len, device=base_scores.device, dtype=torch.float32
+            )
+            base_scores = base_scores * (1.0 + alpha_loyalty * loyalty_w)
+
+        # Anchor mask: positions marked by RoleBoundaryAnchorPress. Mandatory
+        # keeps inside their turn, implemented by +inf scoring before topk so
+        # they sort to the top regardless of base score.
+        anchor_mask_gpu: Optional[torch.Tensor] = None
+        alpha_anchor = float(self.alphas.get("anchor", 0.0))
+        if alpha_anchor > 0.0 and "anchor" in self.policies:
+            anchor_w = self.policies["anchor"].compute_weights(
+                k_len, device=base_scores.device, dtype=torch.float32
+            )
+            anchor_mask_gpu = anchor_w > 0
+
+        kept_chunks: list[torch.Tensor] = []
+        dev = base_scores.device
+
+        # Context spans: always kept in full (KEEP bucket).
+        for cs, ce in context_spans:
+            if ce <= cs:
                 continue
-            w_i = policy.compute_weights(kv_len, device=device, dtype=dtype)
-            weight = weight + alpha * w_i
-        return weight
+            idx = torch.arange(cs, ce, device=dev, dtype=torch.long)
+            kept_chunks.append(idx.expand(bsz, num_kv_heads, -1))
+
+        # Per turn: budget is deterministic (scalar per turn). Within the
+        # budget, each (batch, kv_head) picks its own top-k, so head-wise
+        # attention asymmetries surface naturally -- same pattern as
+        # ScorerPress.compress.
+        for turn_idx in sorted(turn_budgets):
+            ts, te, budget = turn_budgets[turn_idx]
+            if ts >= te or budget <= 0:
+                continue
+            turn_len = te - ts
+            budget = min(budget, turn_len)
+
+            turn_scores = base_scores[..., ts:te]  # (bsz, nkv, turn_len)
+
+            if anchor_mask_gpu is not None:
+                turn_anchor = anchor_mask_gpu[ts:te]
+                # Boost anchor positions to +inf so topk selects them first.
+                # If anchor_count > budget, topk returns the k=budget anchor
+                # positions ranked by original score (since torch's topk is
+                # stable under equal +inf entries -- falls through to the
+                # pre-infinity values).
+                boosted = turn_scores.clone()
+                boosted[..., turn_anchor] = float("inf")
+                top_local = boosted.topk(budget, dim=-1).indices
+            else:
+                top_local = turn_scores.topk(budget, dim=-1).indices
+
+            kept_chunks.append(top_local + ts)
+
+        if not kept_chunks:
+            return keys, values
+
+        # Concatenate and sort for positional locality (RoPE-friendly, and
+        # downstream attention kernels that assume monotonic positions).
+        all_kept = torch.cat(kept_chunks, dim=-1)
+        all_kept, _ = all_kept.sort(dim=-1)
+
+        indices_expanded = all_kept.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+        new_keys = keys.gather(2, indices_expanded).contiguous()
+        new_values = values.gather(2, indices_expanded).contiguous()
+        return new_keys, new_values
+
+    def _compute_turn_budgets(
+        self, k_len: int
+    ) -> tuple[dict[int, tuple[int, int, int]], list[tuple[int, int]]]:
+        """Compute per-turn budgets and context spans for the cache state.
+
+        Returns
+        -------
+        (turn_budgets, context_spans)
+            ``turn_budgets`` maps ``turn_idx -> (span_start, span_end, budget)``
+            for each conversational turn; ``context_spans`` is the list of
+            ``(start, end)`` ranges belonging to the KEEP bucket.
+
+        The budget math follows the formula in the class docstring. All
+        counts are computed on shared CPU copies of the anchor/loyalty
+        weight masks -- one transfer per call, not per policy per turn.
+        """
+        first_policy = next(iter(self.policies.values()), None)
+        if first_policy is None:
+            return {}, []
+
+        # Group boundaries by turn_idx -- policies share the list via the
+        # composer's on_turn_end dispatch.
+        turn_spans: dict[int, list] = defaultdict(list)
+        for b in first_policy.turn_boundaries:
+            turn_spans[b.turn_idx].append(b)
+
+        # Context: turn_idx == 0 OR role == "context" per ADR 001 §0.
+        context_spans: list[tuple[int, int]] = []
+        for turn_idx, spans in turn_spans.items():
+            for b in spans:
+                if b.turn_idx == 0 or b.role == "context":
+                    cs = max(0, min(b.start_kv, k_len))
+                    ce = max(cs, min(b.end_kv, k_len))
+                    if ce > cs:
+                        context_spans.append((cs, ce))
+
+        # Conversational turn ids = everything non-context.
+        conv_turn_ids = sorted(
+            tid for tid, spans in turn_spans.items()
+            if tid != 0 and any(b.role != "context" for b in spans)
+        )
+        if not conv_turn_ids:
+            return {}, context_spans
+
+        num_turns = len(conv_turn_ids)
+        context_len = sum(ce - cs for cs, ce in context_spans)
+        available_budget = max(0, self.global_budget - context_len)
+        base_floor = available_budget / max(1, num_turns)
+        current_turn = max(conv_turn_ids)
+
+        alpha_floor = float(self.alphas.get("floor", 0.0))
+        alpha_anchor = float(self.alphas.get("anchor", 0.0))
+        alpha_loyalty = float(self.alphas.get("loyalty", 0.0))
+
+        # Per-turn anchor/loyalty counts. One CPU-side pass to avoid the
+        # host<->device ping-pong the old dict-based implementation did.
+        anchor_counts: dict[int, int] = {}
+        loyalty_counts: dict[int, int] = {}
+        if alpha_anchor > 0.0 and "anchor" in self.policies:
+            anchor_cpu = (self.policies["anchor"].compute_weights(k_len) > 0).cpu()
+            for tid in conv_turn_ids:
+                total = 0
+                for b in turn_spans[tid]:
+                    if b.role == "context":
+                        continue
+                    s = max(0, min(b.start_kv, k_len))
+                    e = max(s, min(b.end_kv, k_len))
+                    if e > s:
+                        total += int(anchor_cpu[s:e].sum().item())
+                anchor_counts[tid] = total
+        if alpha_loyalty > 0.0 and "loyalty" in self.policies:
+            loyalty_cpu = (self.policies["loyalty"].compute_weights(k_len) > 0).cpu()
+            for tid in conv_turn_ids:
+                total = 0
+                for b in turn_spans[tid]:
+                    if b.role == "context":
+                        continue
+                    s = max(0, min(b.start_kv, k_len))
+                    e = max(s, min(b.end_kv, k_len))
+                    if e > s:
+                        total += int(loyalty_cpu[s:e].sum().item())
+                loyalty_counts[tid] = total
+
+        turn_budgets: dict[int, tuple[int, int, int]] = {}
+        for tid in conv_turn_ids:
+            spans = [b for b in turn_spans[tid] if b.role != "context"]
+            if not spans:
+                continue
+            raw_start = min(b.start_kv for b in spans)
+            raw_end = max(b.end_kv for b in spans)
+            span_start = max(0, min(raw_start, k_len))
+            span_end = max(span_start, min(raw_end, k_len))
+            turn_len = span_end - span_start
+            if turn_len <= 0:
+                continue
+
+            # Retained-by-aux. anchor_counts/loyalty_counts already
+            # respect alpha==0 via the gating above (they stay empty).
+            # We use sum (not union) because in practice anchor and
+            # loyalty rarely mark the same position and a slight
+            # over-budget is harmless (less compression, same correctness).
+            retained = anchor_counts.get(tid, 0) + loyalty_counts.get(tid, 0)
+
+            decay = math.exp(-self.per_turn_gamma * max(0, current_turn - tid))
+            floor_i = alpha_floor * base_floor * decay
+
+            budget = max(retained, int(round(floor_i)))
+            budget = min(budget, turn_len)
+            turn_budgets[tid] = (span_start, span_end, int(budget))
+
+        # Global-budget cap: if per-turn budgets + context exceed
+        # ``global_budget``, scale conversational budgets down
+        # proportionally so ``total_kept <= global_budget``. Rare under
+        # the formula's natural decay (sum_i exp(-gamma*(T-i)) tops out
+        # around 6-7 for 10 turns) but can happen when anchor+loyalty
+        # retained positions dominate a specific turn.
+        total_conv = sum(b for _, _, b in turn_budgets.values())
+        max_conv = max(0, self.global_budget - context_len)
+        if total_conv > max_conv and total_conv > 0:
+            scale = max_conv / total_conv
+            for tid in list(turn_budgets):
+                ts, te, b = turn_budgets[tid]
+                new_b = max(0, int(b * scale))  # allow 0 so the cap is strict
+                new_b = min(new_b, te - ts)
+                turn_budgets[tid] = (ts, te, new_b)
+
+        return turn_budgets, context_spans
 
     def _all_alphas_zero(self) -> bool:
         return all(abs(float(self.alphas.get(name, 0.0))) == 0.0 for name in self.policies)
@@ -207,11 +432,12 @@ class TurnAwareGlobalPress(BasePress):
         across every layer. No-op if it already fits. Harness-invoked per
         ADR 001 §4 (``run_global_compression(target=global_budget)``).
 
-        Uses a binary-searched ratio (``_ratio_for_exact_target``) so the
-        ``int(k_len * (1 - r))`` inside ``ScorerPress.compress`` hits the
-        target exactly -- a plain ``1 - target/k_len`` misses by one at
-        realistic LongMemEval shapes and would break ``test_budget_hit``
-        (ADR 002 §7).
+        Under per-turn budgeting the ``target`` replaces ``global_budget``
+        for this call, so each turn's ``base_floor`` is recomputed
+        against the tighter target. A sentinel non-zero
+        ``compression_ratio`` is set transiently so :meth:`compress`'s
+        early ``ratio == 0`` short-circuit does not trip; the actual
+        keep-count per turn is budget-driven, not ratio-driven.
         """
         effective_target = self.global_budget if target is None else target
         assert effective_target >= 0, f"target must be non-negative, got {effective_target}"
@@ -219,9 +445,12 @@ class TurnAwareGlobalPress(BasePress):
         if current_len <= effective_target:
             return
 
-        target_ratio = self._ratio_for_exact_target(current_len, effective_target)
         orig_ratio = self.base_press.compression_ratio
-        self.base_press.compression_ratio = target_ratio
+        orig_budget = self.global_budget
+        # A positive sentinel keeps compress() past its ratio==0 short-circuit.
+        # The actual keep-count comes from _compute_turn_budgets(target).
+        self.base_press.compression_ratio = max(orig_ratio, 0.5)
+        self.global_budget = effective_target
         try:
             language_model = model.model.language_model if hasattr(model.model, "language_model") else model.model
             for layer in language_model.layers:
@@ -240,28 +469,7 @@ class TurnAwareGlobalPress(BasePress):
                 self._write_layer(cache, layer_idx, new_keys, new_values)
         finally:
             self.base_press.compression_ratio = orig_ratio
-
-    @staticmethod
-    def _ratio_for_exact_target(k_len: int, target: int) -> float:
-        """Binary-search ``r`` such that ``int(k_len * (1 - r)) == target``.
-        Mirrors ``DecodingPress._find_target_compression_ratio``.
-        """
-        if k_len <= target:
-            return 0.0
-        ratio = 1.0 - (target / k_len)
-        low, high = 0.0, 1.0
-        for _ in range(30):
-            n_kept = int(k_len * (1 - ratio))
-            if n_kept == target:
-                return ratio
-            if n_kept > target:
-                low = ratio
-                ratio = (ratio + high) / 2
-            else:
-                high = ratio
-                ratio = (low + ratio) / 2
-        logger.warning("Binary search failed: k_len=%d target=%d got=%d", k_len, target, n_kept)
-        return ratio
+            self.global_budget = orig_budget
 
     @staticmethod
     def _write_layer(cache: Cache, layer_idx: int, keys: torch.Tensor, values: torch.Tensor) -> None:

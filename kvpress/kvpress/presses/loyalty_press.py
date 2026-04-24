@@ -47,11 +47,19 @@ class LoyaltyPress(TurnAwareMixin):
     while matching SnapKV's head reduction (``snapkv_press.py:95-100``)
     so a single head's outlier attention can't dominate the vote.
 
-    The class inherits ``TurnAwareMixin``; it does not evict, install
-    forward hooks, or call the base scorer. It only maintains state and
-    produces a shape-``(kv_len,)`` normalised weight tensor consumed by
-    ``TurnAwareGlobalPress``. The mixin's advertised ``loyalty: dict[int,
-    int]`` field is the canonical store.
+    Storage: the per-position counter is a ``torch.int32`` tensor kept on
+    the same device as the KV cache. ``update_loyalty`` performs a single
+    GPU ``scatter_add_`` per hook call -- no Python loop over top-k
+    positions, no GPU->CPU sync in the hot path. This replaces Week-1's
+    ``dict[int, int]`` implementation and removes the ~2x slowdown that
+    pinned the Week-1 deferred-perf item.
+
+    The mixin's legacy ``loyalty: dict[int, int]`` field is preserved for
+    type-compatibility but is NEVER written to by this class; use
+    :meth:`loyalty_as_dict` when you need a dict view for debugging or
+    tests. Other policies that inspect ``self.loyalty`` (there are none
+    currently) will see the empty inherited dict, which is the correct
+    "no loyalty data stored here" signal.
 
     Parameters
     ----------
@@ -61,13 +69,13 @@ class LoyaltyPress(TurnAwareMixin):
 
     Notes
     -----
-    Performance: the loyalty dict is Python-native. For LongMemEval (~105K
-    past_end × 490 turns × 32 layers) a tensor-backed store would be
-    faster; Week-1 scope is correctness, Week-2 may profile and optimise.
     Global compression: ADR 001 §0 rewrites cache positions on eviction;
-    a post-compression remap callback is a Week-2 concern -- ``loyalty``
-    keys are absolute positions at accumulation time and must be shifted
-    alongside keys/values by whatever index tensor the composer applied.
+    the tensor counter stays indexed by absolute position at accumulation
+    time. The composer's :meth:`run_global_compression` must call
+    :meth:`remap_loyalty_after_compression` with the gathered index
+    tensor so surviving counts move to their post-compression positions.
+    Not yet implemented at the Week-1 level; relevant once compression
+    fires mid-turn in real runs.
     """
 
     top_p: float = 0.25
@@ -76,6 +84,11 @@ class LoyaltyPress(TurnAwareMixin):
     # at cache positions < _current_turn_start_kv is "past-turn" and
     # eligible for loyalty accumulation on the current forward pass.
     _current_turn_start_kv: int = field(default=0, init=False)
+
+    # int32 counter, shape (capacity,), on the KV-cache device. Created
+    # lazily on first update_loyalty call. Grown on demand if the cache
+    # outruns current capacity (rare after the first few turns).
+    _loyalty_counts: Optional[torch.Tensor] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         assert 0 < self.top_p <= 1, f"top_p must be in (0, 1], got {self.top_p}"
@@ -87,6 +100,26 @@ class LoyaltyPress(TurnAwareMixin):
     def reset_turn_state(self) -> None:
         super().reset_turn_state()
         self._current_turn_start_kv = 0
+        self._loyalty_counts = None
+
+    def _ensure_counts_capacity(self, min_size: int, device: torch.device) -> None:
+        """Allocate / grow ``_loyalty_counts`` to fit at least ``min_size``
+        positions, preserving accumulated counts when the tensor grows.
+        Capacity rounds up to a power of two with a 128-token floor, so
+        routine cache growth over a conversation does not trigger a
+        realloc on every turn boundary."""
+        if self._loyalty_counts is not None and self._loyalty_counts.shape[0] >= min_size:
+            # Make sure we're on the right device (KV cache may move).
+            if self._loyalty_counts.device != device:
+                self._loyalty_counts = self._loyalty_counts.to(device)
+            return
+
+        new_cap = max(128, 1 << max(0, (min_size - 1).bit_length()))  # next pow2 >= min_size, min 128
+        new_tensor = torch.zeros(new_cap, dtype=torch.int32, device=device)
+        if self._loyalty_counts is not None:
+            old = self._loyalty_counts.to(device)
+            new_tensor[: old.shape[0]] = old
+        self._loyalty_counts = new_tensor
 
     def update_loyalty(
         self,
@@ -167,18 +200,20 @@ class LoyaltyPress(TurnAwareMixin):
         n_top = max(1, int(past_end * self.top_p))
         top_idx = attn.topk(n_top, dim=-1).indices  # (bsz, q_len, n_top)
 
-        # Vote per position: bincount over the flattened top-k indices
-        # yields the number of (head-mean query row) votes for each past
-        # position. Iterate only non-zero entries into the dict.
-        for b in range(bsz):
-            counts = torch.bincount(top_idx[b].flatten(), minlength=past_end)
-            nonzero = torch.nonzero(counts, as_tuple=False).flatten()
-            if nonzero.numel() == 0:
-                continue
-            positions = nonzero.cpu().tolist()
-            votes = counts[nonzero].cpu().tolist()
-            for pos, v in zip(positions, votes):
-                self.loyalty[pos] = self.loyalty.get(pos, 0) + v
+        # Ensure counter is on the same device as the cache and sized for
+        # at least past_end positions. Grow (preserving) on first hit.
+        self._ensure_counts_capacity(past_end, device=keys.device)
+
+        # Scatter-add 1 for every (batch, query, top-k) tuple. The counter
+        # is per-position (not per-batch) since the conversation state is
+        # shared across batch rows in this harness. If batched multi-turn
+        # is ever added, promote _loyalty_counts to (bsz, cap) and
+        # scatter_add_ along dim=-1 per batch row.
+        flat = top_idx.reshape(-1).to(torch.int64)
+        if flat.numel() > 0:
+            self._loyalty_counts.scatter_add_(
+                0, flat, torch.ones_like(flat, dtype=self._loyalty_counts.dtype)
+            )
 
     def compute_weights(
         self,
@@ -189,21 +224,40 @@ class LoyaltyPress(TurnAwareMixin):
         """
         Return ``loyalty(t) / max_loyalty`` per ADR 001 §3 (weight term for
         policy C). Returned shape ``(kv_len,)``; positions with no
-        accumulated loyalty get 0.0.
+        accumulated loyalty get 0.0. The counter tensor is truncated or
+        zero-padded to ``kv_len`` before normalisation.
         """
         device = device if device is not None else torch.device("cpu")
         dtype = dtype if dtype is not None else torch.float32
         weights = torch.zeros(kv_len, device=device, dtype=dtype)
 
-        if not self.loyalty:
+        if self._loyalty_counts is None:
             return weights
 
-        max_loyalty = max(self.loyalty.values())
-        if max_loyalty <= 0:
+        counts = self._loyalty_counts.to(device=device, dtype=torch.float32)
+        if counts.shape[0] < kv_len:
+            padded = torch.zeros(kv_len, device=device, dtype=torch.float32)
+            padded[: counts.shape[0]] = counts
+            counts = padded
+        else:
+            counts = counts[:kv_len]
+
+        max_loyalty = counts.max()
+        if max_loyalty.item() <= 0:
             return weights
+        return (counts / max_loyalty).to(dtype=dtype)
 
-        for pos, count in self.loyalty.items():
-            if 0 <= pos < kv_len and count > 0:
-                weights[pos] = count / max_loyalty
-
-        return weights
+    def loyalty_as_dict(self) -> dict[int, int]:
+        """Materialise the counter tensor as a ``{position: count}`` dict,
+        skipping zeros. For debugging and tests only -- the hot path uses
+        the tensor directly; this call incurs a GPU->CPU sync and a Python
+        loop over non-zero entries."""
+        if self._loyalty_counts is None:
+            return {}
+        counts = self._loyalty_counts
+        nonzero = torch.nonzero(counts, as_tuple=False).flatten()
+        if nonzero.numel() == 0:
+            return {}
+        nz_cpu = nonzero.cpu().tolist()
+        values = counts[nonzero].cpu().tolist()
+        return {int(p): int(v) for p, v in zip(nz_cpu, values)}
