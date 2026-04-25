@@ -1,0 +1,134 @@
+{
+  "smoke_run": "smoke_002_tune20_alpha111_live",
+  "n_tasks": 228,
+  "static_smoke_001": {
+    "baseline": {
+      "overall": 22.19,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 22.19
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 23.68,
+        "iter_3": 22.81,
+        "iter_4": 22.81,
+        "iter_5": 23.68,
+        "iter_6": 22.81,
+        "iter_7": 21.93,
+        "iter_8": 20.61,
+        "iter_9": 20.61,
+        "iter_10": 19.3
+      },
+      "mrr": 27.34,
+      "recall": 32.02,
+      "final_pass_rate": 19.3,
+      "status_counts": {
+        "compile_error": 95,
+        "pass": 506,
+        "runtime_error": 1676,
+        "timeout": 3
+      },
+      "mean_code_similarity": 0.0
+    },
+    "turnkv": {
+      "overall": 22.24,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 22.24
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 23.68,
+        "iter_3": 22.81,
+        "iter_4": 22.81,
+        "iter_5": 23.25,
+        "iter_6": 22.81,
+        "iter_7": 22.37,
+        "iter_8": 20.61,
+        "iter_9": 21.49,
+        "iter_10": 18.86
+      },
+      "mrr": 27.32,
+      "recall": 32.02,
+      "final_pass_rate": 18.86,
+      "status_counts": {
+        "compile_error": 183,
+        "pass": 507,
+        "runtime_error": 1589,
+        "timeout": 1
+      },
+      "mean_code_similarity": 0.0
+    }
+  },
+  "live_smoke_002": {
+    "baseline": {
+      "overall": 4.9,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 4.9
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 8.62,
+        "iter_3": 3.77,
+        "iter_4": 1.31,
+        "iter_5": 0.66,
+        "iter_6": 0.67,
+        "iter_7": 0.0,
+        "iter_8": 0.0,
+        "iter_9": 0.0,
+        "iter_10": 0.0
+      },
+      "mrr": 28.23,
+      "recall": 34.65,
+      "final_pass_rate": 34.65,
+      "status_counts": {
+        "compile_error": 96,
+        "pass": 79,
+        "runtime_error": 1431,
+        "skipped_after_pass": 669,
+        "timeout": 5
+      }
+    },
+    "turnkv": {
+      "overall": 4.81,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 4.81
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 6.9,
+        "iter_3": 5.56,
+        "iter_4": 0.65,
+        "iter_5": 0.66,
+        "iter_6": 0.0,
+        "iter_7": 0.66,
+        "iter_8": 0.0,
+        "iter_9": 0.0,
+        "iter_10": 0.0
+      },
+      "mrr": 27.89,
+      "recall": 34.21,
+      "final_pass_rate": 34.21,
+      "status_counts": {
+        "compile_error": 110,
+        "pass": 78,
+        "runtime_error": 1416,
+        "skipped_after_pass": 659,
+        "timeout": 17
+      }
+    }
+  },
+  "delta_pp_live": {
+    "overall": -0.09,
+    "recall": -0.44,
+    "final_pass_rate": -0.44
+  },
+  "delta_pp_static": {
+    "overall": 0.05,
+    "recall": 0.0,
+    "final_pass_rate": -0.44
+  },
+  "static_vs_live_recall_lift": {
+    "baseline": 2.63,
+    "turnkv": 2.19
+  }
+}

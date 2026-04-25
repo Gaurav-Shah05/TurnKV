@@ -44,26 +44,27 @@ subdir prefix encodes the mode (`baseline_snapkv_live_smoke_*` vs
 
 - **Baseline shard 4 OOM'd at model load** on first dispatch — Modal H100
   contention manifested as `torch.AcceleratorError: CUDA error: out of memory`
-  inside `caching_allocator_warmup` before any task ran. Re-dispatched as a
-  one-off; numbers below are the **205-task intersection** of the 9 surviving
-  baseline shards × the matching 10 turnkv shards. Full 228-task numbers will
-  be regenerated when shard-4-retry lands.
+  inside `caching_allocator_warmup` before any task ran. Re-dispatched
+  successfully at 02:39 EDT, completed 03:05; the retry's results landed in
+  a `/1/` numerically-incremented subdirectory because `_results_dir`'s
+  collision logic saw the empty parent dir from the failed attempt. The
+  numbers below use the full 228-task split with shard 4 stitched in.
 - Live runs took ~46 min/shard (vs ~25 min/shard for static), so wall-clock
   for the full fan-out was ~48 min thanks to 10-way parallelism.
 
 ## Results
 
-Headline (205-task common subset, *same task universe in all four cells*):
+Headline (full 228-task split, all four cells over the same task universe):
 
 ```
 config                 overall   final-iter    mrr   recall
-baseline_static          22.68       19.02   28.52    32.68
-turnkv_static            22.73       18.54   28.50    32.68
-baseline_live             5.30       36.59   29.81    36.59
-turnkv_live               5.29       36.59   29.56    36.59
+baseline_static          22.19       19.30   27.34    32.02
+turnkv_static            22.24       18.86   27.32    32.02
+baseline_live             4.90       34.65   28.23    34.65
+turnkv_live               4.81       34.21   27.89    34.21
 ```
 
-> Why does `overall` collapse from ~22.7 to ~5.3 going static→live? Because
+> Why does `overall` collapse from ~22.2 to ~4.9 going static→live? Because
 > `early_stop_on_pass=True` marks subsequent iters as `metric_excluded` once
 > a task passes — `overall` is the pooled mean over all *kept* rows, so the
 > denominator at iter ≥ 2 only contains tasks that haven't passed yet. In
@@ -73,71 +74,74 @@ turnkv_live               5.29       36.59   29.56    36.59
 > shrinking denominator. **`recall` is the apples-to-apples cross-mode
 > headline** (% of tasks where any iter passes).
 
-Static→live recall: **+3.91 pp on both presses (32.68 → 36.59)**. So the live
-harness genuinely helps the model solve harder tasks (it can iterate on
-*its own* code with real feedback, rather than being teacher-forced into a
-particular reference trajectory). But the lift is identical for SnapKV and
-TurnKV — the press isn't the lever.
+Static→live recall lift: **baseline +2.63 pp (32.02→34.65), turnkv +2.19 pp
+(32.02→34.21)**. So the live harness genuinely helps the model solve harder
+tasks (it can iterate on *its own* code with real feedback, rather than being
+teacher-forced into a particular reference trajectory). The lift is slightly
+larger for SnapKV than for TurnKV — the press is not the lever; if anything,
+α=(1,1,1) interferes a tiny bit with the model's ability to capitalize on
+live feedback.
 
 Per-iteration Pass@1 in live mode (% of tasks not yet passed):
 
 ```
 iter   B-live   T-live   delta
-   1    24.88   24.88   +0.00
-   2     9.74    7.79   -1.95
-   3     4.32    6.34   +2.02
-   4     0.75    0.75   +0.00
-   5     0.76    0.76   +0.00
-   6     0.76    0.00   -0.76
-   7     0.00    0.76   +0.76
+   1    23.68   23.68   +0.00
+   2     8.62    6.90   -1.72
+   3     3.77    5.56   +1.79
+   4     1.31    0.65   -0.66
+   5     0.66    0.66   +0.00
+   6     0.67    0.00   -0.67
+   7     0.00    0.66   +0.66
    8     0.00    0.00   +0.00
    9     0.00    0.00   +0.00
   10     0.00    0.00   +0.00
 ```
 
-Total tasks passing at SOME iter ends up identical at 75/205 (36.59%) — turnkv
-just shifts a couple of late-pass tasks from iter 2 → iter 3 (and vice-versa).
+Recall ends at 79/228 = 34.65% baseline vs 78/228 = 34.21% turnkv — turnkv
+loses one task net, while shifting a couple between iter 2 ↔ iter 3.
 
 Status mix (live, before `metric_excluded` filter):
 
 ```
 status                  baseline   turnkv    delta
-  compile_error              83       85       +2
-  pass                       75       75        0
-  runtime_error            1252     1241      -11
-  skipped_after_pass        636      632       -4
-  timeout                     4       17      +13
+  compile_error              96      110      +14
+  pass                       79       78       -1
+  runtime_error            1431     1416      -15
+  skipped_after_pass        669      659      -10
+  timeout                     5       17      +12
 ```
 
-Live mode mostly produces `runtime_error` (75% of pre-stop iters) — the
+Live mode mostly produces `runtime_error` (~63% of pre-stop iters) — the
 generated code parses fine but doesn't pass the test cases. The
-`compile_error` story we worried about under static (+88 at iter 10) does **not**
-show up in live: only +2 compile_errors total. **Timeouts** are
-3.25× higher under turnkv (+13), which is consistent with eviction
-occasionally removing import statements or function-signature tokens, leading
-the model to regenerate the function from scratch with extra retries that hit
-the 30-s executor timeout.
+`compile_error` story we worried about under static (+88 at iter 10) is much
+muted in live (+14, ≈6× smaller). **Timeouts** are 3.4× higher under turnkv
+(+12), which is consistent with eviction occasionally removing import
+statements or function-signature tokens, leading the model to regenerate the
+function from scratch with extra retries that hit the 30-s executor timeout.
 
 ## Takeaway
 
-1. **Live loop does not unlock TurnKV.** At α=(1,1,1), TurnKV and SnapKV are
-   bit-tied at 36.59 recall, identical iter-1 (24.88), and offsetting moves
-   between iter 2 and iter 3. Mrr is essentially the same. So my prediction
-   from smoke #1 — that live loop wouldn't make turnkv look better against
-   baseline without α tuning — was correct on the headline. (My specific
+1. **Live loop does not unlock TurnKV.** At α=(1,1,1), TurnKV is *slightly
+   worse* than SnapKV in live (-0.44 pp recall, -0.09 pp overall, both
+   within noise for n=228). Identical iter-1 (23.68), offsetting moves
+   between iter 2 (-1.72) and iter 3 (+1.79). My prediction from smoke #1 —
+   that live loop wouldn't make turnkv look better against baseline without
+   α tuning — was correct on the headline. (My specific
    compile_error-compounding hypothesis was *wrong*: live mode produces
-   barely any compile_errors at all because the model is generating fresh
-   code each iter, not amending a teacher-forced trajectory.)
+   only +14 compile_errors vs static's +88, because the model is
+   generating fresh code each iter, not amending a teacher-forced trajectory.)
 
-2. **Live mode beats static on recall by ~4 pp (32.68 → 36.59) for both
-   presses.** That delta is identical across SnapKV and TurnKV, so it's the
-   harness×model interaction (verbal-feedback-driven iteration on the model's
-   own code) doing the work, not the eviction policy. This matches the
-   intuition that ConvCodeWorld's static replay is a harder evaluation regime
-   for the *model* (it has no agency over the code it's "fixing") — but
-   doesn't tell us anything new about the press.
+2. **Live mode beats static on recall by ~2.5 pp on both presses (32.02 →
+   34.65 baseline, 32.02 → 34.21 turnkv).** Lift is slightly larger for
+   SnapKV (+2.63) than TurnKV (+2.19) — the press is not the lever; if
+   anything, α=(1,1,1) interferes a tiny bit with the model's ability to
+   capitalize on live feedback. This matches the intuition that ConvCodeWorld's
+   static replay is a harder evaluation regime for the *model* (it has no
+   agency over the code it's "fixing") — but doesn't tell us anything new
+   about the press.
 
-3. **Timeout count tripled under TurnKV (4 → 17, +13).** This is the new
+3. **Timeout count tripled under TurnKV (5 → 17, +12).** This is the new
    structural signal in live: tasks where TurnKV evictions force the model
    to regenerate code that ends up looping or otherwise hitting the 30-s
    executor cap. Same root cause we suspected from the static `compile_error`
@@ -162,11 +166,10 @@ the 30-s executor timeout.
 
 ## Next steps
 
-- Wait for shard-4 retry → regenerate the full 228-task version of this
-  bundle (likely <0.5 pp difference from the 205-task subset numbers).
 - α-ablation on the 228-task tune split: (1,0,0), (0,1,0), (0,0,1), all under
   the same live-mode harness. This is the single most informative thing to
-  run next.
-- Investigate the 13 extra timeouts under turnkv — pull the task IDs that
+  run next. Smoke #3 covers the (0,0,1) Loyalty-only cell; the other two
+  follow if Loyalty-only doesn't conclusively win.
+- Investigate the 12 extra timeouts under turnkv — pull the task IDs that
   hit timeout under turnkv but not baseline, look at the cache state at the
   iteration where turnkv first diverges.
