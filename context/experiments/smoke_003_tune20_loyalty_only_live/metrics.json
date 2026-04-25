@@ -1,0 +1,101 @@
+{
+  "smoke_run": "smoke_003_tune20_loyaltyonly_live",
+  "n_tasks": 228,
+  "alphas": {
+    "floor": 0.0,
+    "anchor": 0.0,
+    "loyalty": 1.0
+  },
+  "tunables": {
+    "floor_gamma": 0.1,
+    "anchor_beta": 0.25,
+    "loyalty_top_p": 0.25,
+    "loyalty_update_every": 5
+  },
+  "configs": {
+    "baseline_live": {
+      "overall": 4.9,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 4.9
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 8.62,
+        "iter_3": 3.77,
+        "iter_4": 1.31,
+        "iter_5": 0.66,
+        "iter_6": 0.67,
+        "iter_7": 0.0,
+        "iter_8": 0.0,
+        "iter_9": 0.0,
+        "iter_10": 0.0
+      },
+      "mrr": 28.23,
+      "recall": 34.65,
+      "final_pass_rate": 34.65,
+      "status_counts": {
+        "compile_error": 96,
+        "pass": 79,
+        "runtime_error": 1431,
+        "skipped_after_pass": 669,
+        "timeout": 5
+      }
+    },
+    "turnkv_live_a111": {
+      "overall": 4.81,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 4.81
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 6.9,
+        "iter_3": 5.56,
+        "iter_4": 0.65,
+        "iter_5": 0.66,
+        "iter_6": 0.0,
+        "iter_7": 0.66,
+        "iter_8": 0.0,
+        "iter_9": 0.0,
+        "iter_10": 0.0
+      },
+      "mrr": 27.89,
+      "recall": 34.21,
+      "final_pass_rate": 34.21,
+      "status_counts": {
+        "compile_error": 110,
+        "pass": 78,
+        "runtime_error": 1416,
+        "skipped_after_pass": 659,
+        "timeout": 17
+      }
+    },
+    "turnkv_live_loyaltyonly": {
+      "overall": 4.9,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 4.9
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 8.62,
+        "iter_3": 3.77,
+        "iter_4": 1.31,
+        "iter_5": 0.66,
+        "iter_6": 0.0,
+        "iter_7": 0.67,
+        "iter_8": 0.0,
+        "iter_9": 0.0,
+        "iter_10": 0.0
+      },
+      "mrr": 28.22,
+      "recall": 34.65,
+      "final_pass_rate": 34.65,
+      "status_counts": {
+        "compile_error": 3,
+        "pass": 79,
+        "runtime_error": 1512,
+        "skipped_after_pass": 668,
+        "timeout": 18
+      }
+    }
+  }
+}

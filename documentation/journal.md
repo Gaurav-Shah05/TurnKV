@@ -10,6 +10,46 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-25 — smoke #3: Loyalty-only (α=0,0,1) ties baseline exactly — @gaurav
+
+Picked Loyalty-only as the highest-EV α-ablation: smoke #2's status-mix story
+fingered the heuristic policies (RoleAnchor over-protecting role boundaries +
+TurnFloor's per-turn reservation pushing eviction onto code-body tokens) as
+the source of the +88 static compile_errors and +12 live timeouts. Loyalty
+is the only data-driven signal in the triad, so isolating it tests both "is
+heuristic over-protection the problem?" and "does data-driven retention beat
+SnapKV's prefill-attention-based scoring?" at once.
+
+Result: **Loyalty-only EXACTLY ties baseline on live-loop recall** (34.65 vs
+34.65, 79 passes each, identical iter-1 through iter-5). The two presses
+swap *which* two tasks pass (baseline-only-pass: 2, loyalty-only-pass: 2,
+both: 77, both fail: 147), but the count is identical.
+
+The actually interesting signal: **status mix shifts dramatically.**
+- compile_error: 96 → 3 (a 32× reduction!)
+- runtime_error: 1431 → 1512 (+81)
+- timeout: 5 → 18 (+13)
+
+Loyalty's data-driven retention IS preserving the structurally-important
+tokens (imports, signatures, indentation) that make code parse. Confirms half
+the smoke #2 hypothesis — the compile_error spike at α=(1,1,1) was indeed
+from heuristic over-protection. But Loyalty alone doesn't convert that
+structural win into more passes; it just shifts failures from "code doesn't
+parse" into "code parses but doesn't work" + "code generates infinite loop
+and times out". The +13 timeout regression is identical to α=(1,1,1)'s, so
+timeouts come from Loyalty's own evictions, not from the heuristic policies.
+
+Reading: the paper's three-policy thesis isn't dead — but at global=4096
+neither (1,1,1) nor (0,0,1) beats plain SnapKV. Two competing explanations:
+(a) wrong α weighting; (b) wrong regime — eviction at budget=4096 isn't
+binding hard enough to differentiate ANY strategy. Highest-EV next step is a
+budget sweep (drop to 1024 or 2048) to test (b) before more α-cells.
+
+Smoke #3 writeup: `context/experiments/003-smoke-tune20-loyalty-only-live.md`.
+Metrics: `context/experiments/smoke_003_tune20_loyalty_only_live/metrics.json`.
+
+---
+
 ## 2026-04-25 — smoke #2: live-loop on the same 228-task tune split — @gaurav
 
 Re-ran the same TurnKV(α=1,1,1) vs SnapKV smoke under `--benchmark-mode live`
