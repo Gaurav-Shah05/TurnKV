@@ -10,6 +10,42 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-25 — smoke #2: live-loop on the same 228-task tune split — @gaurav
+
+Re-ran the same TurnKV(α=1,1,1) vs SnapKV smoke under `--benchmark-mode live`
+(model generates each iter, executor runs it, Gemma-3-4b-it writes verbal
+feedback — the actual Mode-1 ConvCodeWorld pipeline). Same model, same alphas,
+same 228-task split; only the harness mode flipped. Dispatched at 01:42 EDT,
+landed ~02:30 EDT (~46 min/shard with 10-way parallelism).
+
+Headline: **TurnKV and SnapKV stay tied in live too** (recall 36.59 each on
+the 205-task common subset; baseline shard 4 OOM'd on first dispatch and is
+re-running). Live mode beats static by +3.91 pp recall on *both* presses
+(32.68 → 36.59), so the lift is harness×model not policy. The compile_error
+spike that worried us in static (+88) does *not* compound in live (+2 only,
+because the model regenerates fresh code each iter rather than amending a
+teacher-forced trajectory). The new structural signal in live is timeouts:
+4 → 17 (+13) under TurnKV, same root cause we suspected — eviction
+occasionally removes import statements / function signatures, forcing
+regenerate-from-scratch loops that hit the 30-s executor cap.
+
+Direct answer to the "is live better for TurnKV?" question: **no, not at
+α=(1,1,1).** Predictable next step: ablate to find which policy is helping
+vs hurting. Loyalty (data-driven) is the prime suspect for "the helpful one";
+anchor over-protection is the prime suspect for "the hurting one". Plan to
+test α=(0,0,1) (Loyalty-only) next on live mode — if it wins, anchor is
+indeed the culprit; if it doesn't, we need to dig deeper.
+
+Smoke #2 writeup: `context/experiments/002-smoke-tune20-alpha111-live.md`
+plus interim 205-task metrics at
+`context/experiments/smoke_002_tune20_alpha111_live/metrics_205task_subset.json`.
+
+Also along the way: `BENCHMARK_MODE` env-var hook on the smoke scripts
+(default `static`, `=live` to switch); subdir prefix encodes mode so result
+trees never collide.
+
+---
+
 ## 2026-04-25 — first smoke test on the 228-task tune split — @gaurav
 
 Ran TurnKV (α=1,1,1, γ=0.1, β=0.25, K=0.25, update_every=5) vs plain SnapKV on

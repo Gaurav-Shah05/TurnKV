@@ -15,6 +15,23 @@ cd "$script_dir/../../.."
 
 MODAL_PROFILE="${MODAL_PROFILE:-docmanish2312}"
 NUM_SHARDS="${NUM_SHARDS:-10}"
+# BENCHMARK_MODE: "static" (teacher-forced reference prior code per iter, ADR 001 §8)
+# or "live" (model's own generated code is the prior context per iter; needs the
+# feedback model + executor sandbox).
+BENCHMARK_MODE="${BENCHMARK_MODE:-static}"
+# TurnKV alphas + tunables (override via env to run ablations against the
+# (1,1,1) cherry-pick from smoke #1/#2 — e.g. ALPHA_FLOOR=0 ALPHA_ANCHOR=0
+# ALPHA_LOYALTY=1 to test Loyalty-only).
+ALPHA_FLOOR="${ALPHA_FLOOR:-1.0}"
+ALPHA_ANCHOR="${ALPHA_ANCHOR:-1.0}"
+ALPHA_LOYALTY="${ALPHA_LOYALTY:-1.0}"
+FLOOR_GAMMA="${FLOOR_GAMMA:-0.1}"
+ANCHOR_BETA="${ANCHOR_BETA:-0.25}"
+LOYALTY_TOP_P="${LOYALTY_TOP_P:-0.25}"
+LOYALTY_UPDATE_EVERY="${LOYALTY_UPDATE_EVERY:-5}"
+# Optional label that gets baked into the output_subdir + log filename so
+# multiple ablation runs don't collide on the Modal volume. e.g. "loyaltyonly".
+CONFIG_LABEL="${CONFIG_LABEL:-}"
 SHARD_DIR="$script_dir/splits/shards"
 SHARD_STEM="tune_20pct_seed42"
 
@@ -40,8 +57,15 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 LOG_DIR="$script_dir/../../../../.modal_diag"
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-INDEX_FILE="$LOG_DIR/smoke_turnkv_snapkv_${RUN_TS}_index.txt"
-echo "# turnkv_snapkv smoke - profile=$MODAL_PROFILE - $RUN_TS" > "$INDEX_FILE"
+if [[ -n "$CONFIG_LABEL" ]]; then
+  RUN_TAG="turnkv_snapkv_${CONFIG_LABEL}_${BENCHMARK_MODE}_smoke"
+  LOG_PREFIX="smoke_turnkv_snapkv_${CONFIG_LABEL}_${BENCHMARK_MODE}"
+else
+  RUN_TAG="turnkv_snapkv_${BENCHMARK_MODE}_smoke"
+  LOG_PREFIX="smoke_turnkv_snapkv_${BENCHMARK_MODE}"
+fi
+INDEX_FILE="$LOG_DIR/${LOG_PREFIX}_${RUN_TS}_index.txt"
+echo "# turnkv_snapkv smoke - mode=$BENCHMARK_MODE label='$CONFIG_LABEL' profile=$MODAL_PROFILE alphas=($ALPHA_FLOOR,$ALPHA_ANCHOR,$ALPHA_LOYALTY) - $RUN_TS" > "$INDEX_FILE"
 
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   shard_json="$SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
@@ -50,12 +74,12 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     exit 1
   fi
   shard_json_container="$CONTAINER_SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
-  output_subdir="turnkv_snapkv_smoke_${RUN_TS}/shard_${shard}_of_${NUM_SHARDS}"
-  log_file="$LOG_DIR/smoke_turnkv_snapkv_${RUN_TS}_shard${shard}.log"
+  output_subdir="${RUN_TAG}_${RUN_TS}/shard_${shard}_of_${NUM_SHARDS}"
+  log_file="$LOG_DIR/${LOG_PREFIX}_${RUN_TS}_shard${shard}.log"
 
   shard_args=(
     evaluation/benchmarks/convcodeworld/modal_app.py::run_convcodeworld_live
-    --benchmark-mode static
+    --benchmark-mode "$BENCHMARK_MODE"
     --model meta-llama/Meta-Llama-3.1-8B-Instruct
     --attn-implementation flash_attention_3
     --feedback-config CF_EF_UNIT_SNF
@@ -69,13 +93,13 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     --task-ids "@$shard_json_container"
     --output-subdir "$output_subdir"
     --cot
-    --alpha-floor 1.0
-    --alpha-anchor 1.0
-    --alpha-loyalty 1.0
-    --floor-gamma 0.1
-    --anchor-beta 0.25
-    --loyalty-top-p 0.25
-    --loyalty-update-every 5
+    --alpha-floor "$ALPHA_FLOOR"
+    --alpha-anchor "$ALPHA_ANCHOR"
+    --alpha-loyalty "$ALPHA_LOYALTY"
+    --floor-gamma "$FLOOR_GAMMA"
+    --anchor-beta "$ANCHOR_BETA"
+    --loyalty-top-p "$LOYALTY_TOP_P"
+    --loyalty-update-every "$LOYALTY_UPDATE_EVERY"
     --require-flashdecode
     --log-level INFO
   )

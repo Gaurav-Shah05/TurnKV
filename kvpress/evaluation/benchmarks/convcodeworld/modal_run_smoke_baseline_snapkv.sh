@@ -14,6 +14,10 @@ cd "$script_dir/../../.."
 
 MODAL_PROFILE="${MODAL_PROFILE:-gauravmshah2004}"
 NUM_SHARDS="${NUM_SHARDS:-10}"
+# BENCHMARK_MODE: "static" (teacher-forced reference prior code per iter, ADR 001 §8)
+# or "live" (model's own generated code is the prior context per iter; needs the
+# feedback model + executor sandbox).
+BENCHMARK_MODE="${BENCHMARK_MODE:-static}"
 SHARD_DIR="$script_dir/splits/shards"
 SHARD_STEM="tune_20pct_seed42"
 
@@ -39,8 +43,9 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 LOG_DIR="$script_dir/../../../../.modal_diag"
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-INDEX_FILE="$LOG_DIR/smoke_baseline_snapkv_${RUN_TS}_index.txt"
-echo "# baseline_snapkv smoke - profile=$MODAL_PROFILE - $RUN_TS" > "$INDEX_FILE"
+RUN_TAG="baseline_snapkv_${BENCHMARK_MODE}_smoke"
+INDEX_FILE="$LOG_DIR/smoke_baseline_snapkv_${BENCHMARK_MODE}_${RUN_TS}_index.txt"
+echo "# baseline_snapkv smoke - mode=$BENCHMARK_MODE profile=$MODAL_PROFILE - $RUN_TS" > "$INDEX_FILE"
 
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   shard_json="$SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
@@ -49,12 +54,12 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     exit 1
   fi
   shard_json_container="$CONTAINER_SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
-  output_subdir="baseline_snapkv_smoke_${RUN_TS}/shard_${shard}_of_${NUM_SHARDS}"
-  log_file="$LOG_DIR/smoke_baseline_snapkv_${RUN_TS}_shard${shard}.log"
+  output_subdir="${RUN_TAG}_${RUN_TS}/shard_${shard}_of_${NUM_SHARDS}"
+  log_file="$LOG_DIR/smoke_baseline_snapkv_${BENCHMARK_MODE}_${RUN_TS}_shard${shard}.log"
 
   shard_args=(
     evaluation/benchmarks/convcodeworld/modal_app.py::run_convcodeworld_live
-    --benchmark-mode static
+    --benchmark-mode "$BENCHMARK_MODE"
     --model meta-llama/Meta-Llama-3.1-8B-Instruct
     --attn-implementation flash_attention_3
     --feedback-config CF_EF_UNIT_SNF
