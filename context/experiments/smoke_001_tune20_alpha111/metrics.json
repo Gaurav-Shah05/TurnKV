@@ -1,0 +1,141 @@
+{
+  "smoke_run": "smoke_001_tune20_alpha111",
+  "dispatched_at_edt": {
+    "baseline": "2026-04-24T22:27:41",
+    "turnkv": "2026-04-24T22:28:20"
+  },
+  "split": {
+    "split_path": "kvpress/evaluation/benchmarks/convcodeworld/splits/tune_20pct_seed42.json",
+    "n_total_universe": 1140,
+    "n_tune": 228,
+    "seed": 42,
+    "stratification": "none (random sampling, sorted-lex universe)",
+    "feedback_config": "CF_EF_UNIT_SNF"
+  },
+  "shard_layout": {
+    "num_shards": 10,
+    "stride_strategy": "interleaved (idx % num_shards)",
+    "shard_sizes": [
+      23,
+      23,
+      23,
+      23,
+      23,
+      23,
+      23,
+      23,
+      22,
+      22
+    ]
+  },
+  "config_common": {
+    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "feedback_model": "google/gemma-3-4b-it",
+    "attn_implementation": "flash_attention_3",
+    "benchmark_mode": "static",
+    "global_budget": 4096,
+    "local_budget": 2048,
+    "max_turns": 10,
+    "max_new_tokens": 1024,
+    "compression_ratio": 0.0,
+    "cot": true,
+    "require_flashdecode": true
+  },
+  "baseline": {
+    "press_name": "snapkv",
+    "modal_profile": "gauravmshah2004",
+    "metrics": {
+      "overall": 22.19,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 22.19
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 23.68,
+        "iter_3": 22.81,
+        "iter_4": 22.81,
+        "iter_5": 23.68,
+        "iter_6": 22.81,
+        "iter_7": 21.93,
+        "iter_8": 20.61,
+        "iter_9": 20.61,
+        "iter_10": 19.3
+      },
+      "mrr": 27.34,
+      "recall": 32.02,
+      "final_pass_rate": 19.3,
+      "status_counts": {
+        "compile_error": 95,
+        "pass": 506,
+        "runtime_error": 1676,
+        "timeout": 3
+      },
+      "mean_code_similarity": 0.0
+    },
+    "shards_completed": 10,
+    "rows": 2280,
+    "unique_task_ids": 228
+  },
+  "turnkv": {
+    "press_name": "turnkv_snapkv",
+    "modal_profile": "docmanish2312",
+    "alphas": {
+      "floor": 1.0,
+      "anchor": 1.0,
+      "loyalty": 1.0
+    },
+    "tunables": {
+      "floor_gamma": 0.1,
+      "anchor_beta": 0.25,
+      "loyalty_top_p": 0.25,
+      "loyalty_update_every": 5
+    },
+    "metrics": {
+      "overall": 22.24,
+      "per_feedback_config": {
+        "CF_EF_UNIT_SNF": 22.24
+      },
+      "per_iteration": {
+        "iter_1": 23.68,
+        "iter_2": 23.68,
+        "iter_3": 22.81,
+        "iter_4": 22.81,
+        "iter_5": 23.25,
+        "iter_6": 22.81,
+        "iter_7": 22.37,
+        "iter_8": 20.61,
+        "iter_9": 21.49,
+        "iter_10": 18.86
+      },
+      "mrr": 27.32,
+      "recall": 32.02,
+      "final_pass_rate": 18.86,
+      "status_counts": {
+        "compile_error": 183,
+        "pass": 507,
+        "runtime_error": 1589,
+        "timeout": 1
+      },
+      "mean_code_similarity": 0.0
+    },
+    "shards_completed": 10,
+    "rows": 2280,
+    "unique_task_ids": 228
+  },
+  "delta_pp": {
+    "overall": 0.05,
+    "final_iter": -0.44,
+    "per_iteration": {
+      "iter_1": 0.0,
+      "iter_2": 0.0,
+      "iter_3": 0.0,
+      "iter_4": 0.0,
+      "iter_5": -0.43,
+      "iter_6": 0.0,
+      "iter_7": 0.44,
+      "iter_8": 0.0,
+      "iter_9": 0.88,
+      "iter_10": -0.44
+    }
+  }
+}

@@ -210,6 +210,40 @@ def _normalize_benchmark_mode(value: str) -> str:
     return aliases[mode]
 
 
+def _translate_task_ids(value: Optional[str]) -> Optional[str]:
+    """
+    `task_ids` may be:
+      - None / empty            -> None
+      - 'BigCodeBench/0,...'    -> pass through unchanged (CSV)
+      - '@/abs/path/to/file'    -> rewrite the local path to the in-container
+                                   path under /root/kvpress, since the Modal
+                                   image mounts REPO_ROOT at /root/kvpress.
+
+    The local file must live inside REPO_ROOT (otherwise it won't be in the
+    container image). We resolve it on the launcher to fail fast.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if text == "":
+        return None
+    if not text.startswith("@"):
+        return text
+    local_path = Path(text[1:]).expanduser().resolve()
+    if not local_path.is_file():
+        raise FileNotFoundError(f"task_ids @<path> points to missing file: {local_path}")
+    try:
+        rel = local_path.relative_to(REPO_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"task_ids @<path> {local_path} is not inside REPO_ROOT={REPO_ROOT}; "
+            "Modal only mounts REPO_ROOT into /root/kvpress, so the file "
+            "would not exist inside the container."
+        ) from exc
+    container_path = "/root/kvpress/" + rel.as_posix()
+    return f"@{container_path}"
+
+
 def _needs_hf_token(model_name: str | None) -> bool:
     if not model_name:
         return False
@@ -261,6 +295,7 @@ def run_convcodeworld_live(
     feedback_config: str = "CF_EF_UNIT_SNF",
     num_eval_examples: int = 1,
     fraction: float = 1.0,
+    task_ids: Optional[str] = None,
     max_turns: int = 10,
     max_new_tokens: int = 1024,
     verbal_feedback_max_new_tokens: int = 256,
@@ -272,6 +307,7 @@ def run_convcodeworld_live(
     network_isolation: str = "auto",
     cot: bool = True,
     log_level: str = "INFO",
+    output_subdir: Optional[str] = None,
 ) -> str:
     benchmark_mode = _normalize_benchmark_mode(benchmark_mode)
     env = os.environ.copy()
@@ -304,6 +340,18 @@ def run_convcodeworld_live(
             feedback_attn_implementation
         )
 
+    base_output_dir = "/root/kvpress/evaluation/results_convcodeworld_live_modal"
+    if output_subdir:
+        # Sanitize the caller-provided subdir: only allow [A-Za-z0-9._-] and
+        # forbid anything that climbs out of the volume mount.
+        cleaned = output_subdir.strip("/")
+        if not cleaned or any(ch in cleaned for ch in ("..", "\\")) or any(
+            not (ch.isalnum() or ch in "._-/") for ch in cleaned
+        ):
+            raise ValueError(f"output_subdir {output_subdir!r} is invalid; allowed: [A-Za-z0-9._-/].")
+        output_dir = f"{base_output_dir}/{cleaned}"
+    else:
+        output_dir = base_output_dir
     cmd = [
         _container_eval_python(),
         "/root/kvpress/evaluation/benchmarks/convcodeworld/live_loop.py",
@@ -325,7 +373,7 @@ def run_convcodeworld_live(
         f"--network_isolation={network_isolation}",
         f"--cot={cot}",
         f"--log_level={log_level}",
-        "--output_dir=/root/kvpress/evaluation/results_convcodeworld_live_modal",
+        f"--output_dir={output_dir}",
     ]
     _append_optional_flag(cmd, "feedback_model", feedback_model)
     _append_optional_flag(cmd, "attn_implementation", attn_implementation)
@@ -359,6 +407,7 @@ def run_convcodeworld_live(
     _append_optional_flag(cmd, "loyalty_update_every", loyalty_update_every)
     _append_optional_flag(cmd, "alpha_floor_len", alpha_floor_len)
     _append_optional_flag(cmd, "min_floor_tokens", min_floor_tokens)
+    _append_optional_flag(cmd, "task_ids", task_ids)
     subprocess.check_call(cmd, env=env, cwd="/root/kvpress/evaluation")
     hf_cache.commit()
     results_volume.commit()
@@ -401,6 +450,7 @@ def main(
     feedback_config: str = "CF_EF_UNIT_SNF",
     num_eval_examples: int = 1,
     fraction: float = 1.0,
+    task_ids: Optional[str] = None,
     max_turns: int = 10,
     max_new_tokens: int = 1024,
     verbal_feedback_max_new_tokens: int = 256,
@@ -412,9 +462,11 @@ def main(
     network_isolation: str = "auto",
     cot: bool = True,
     log_level: str = "INFO",
+    output_subdir: Optional[str] = None,
     detach_remote: bool = False,
 ) -> None:
     benchmark_mode = _normalize_benchmark_mode(benchmark_mode)
+    task_ids = _translate_task_ids(task_ids)
     for press_name in [p.strip() for p in press_names.split(",") if p.strip()]:
         kwargs = dict(
             benchmark_mode=benchmark_mode,
@@ -449,6 +501,7 @@ def main(
             feedback_config=feedback_config,
             num_eval_examples=num_eval_examples,
             fraction=fraction,
+            task_ids=task_ids,
             max_turns=max_turns,
             max_new_tokens=max_new_tokens,
             verbal_feedback_max_new_tokens=verbal_feedback_max_new_tokens,
@@ -460,6 +513,7 @@ def main(
             network_isolation=network_isolation,
             cot=cot,
             log_level=log_level,
+            output_subdir=output_subdir,
         )
         if detach_remote:
             call = run_convcodeworld_live.spawn(**kwargs)

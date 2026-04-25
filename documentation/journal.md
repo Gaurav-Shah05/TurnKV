@@ -10,6 +10,49 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-25 — first smoke test on the 228-task tune split — @gaurav
+
+Ran TurnKV (α=1,1,1, γ=0.1, β=0.25, K=0.25, update_every=5) vs plain SnapKV on
+228 tasks (= 20% random split of CF_EF_UNIT_SNF, seed 42) under Llama-3.1-8B-Instruct
++ static replay + CoT + global=4096/local=2048. Fanned out 10 H100 shards per
+profile in parallel (baseline → `gauravmshah2004`, turnkv → `docmanish2312`).
+
+Headline: **tied at +0.05 pp overall (22.19 → 22.24); final-iter -0.44 pp**.
+Recall 32.02 either way. Iters 1-4 are bit-identical, divergence starts at iter 5
+which lines up with the TurnFloor `exp(-γ(T-i))` term beginning to bite.
+
+The interesting signal is the **status mix**: 87 runtime_errors became
+compile_errors (95→183, +93%) under TurnKV. So the policy is *changing what the
+model sees* in a structural way without converting any of those changes into
+extra passes. Hypothesis: anchor=1.0 over-protects role-boundary tokens and the
+floor scale-down evicts code-body tokens (function signatures / imports /
+indentation) that were being kept by plain SnapKV. Worth diagnosing before any
+α-sweep.
+
+Plumbing built along the way: deterministic 80/20 split + 10-way interleaved
+shard builder, `--task-ids @<path>` JSON-list support in `live_loop.py`,
+`output_subdir` param in `modal_app.py` to keep the 10 parallel writers in
+race-free per-shard subtrees. Smoke run scripts under
+`kvpress/evaluation/benchmarks/convcodeworld/modal_run_smoke_*.sh`. Full writeup
+in `context/experiments/001-smoke-tune20-alpha111.md`; raw metrics bundle in
+`context/experiments/smoke_001_tune20_alpha111/metrics.json`.
+
+Operational notes (Windows + Modal):
+- Cisco AnyConnect (CMU VPN) hijacks WSL2 networking — its adapter has metric 1
+  vs WSL's 15, so all WSL outbound dies. Pivoted to running Modal CLI from
+  Windows-side Python 3.13 + Git Bash, mirroring `~/.modal.toml`.
+- `modal run -d ::run_convcodeworld_live` skips `main()`, so the launcher path
+  translation never fires — passed the container path directly.
+- Git Bash MSYS rewrites `/root/...` → `C:/Program Files/Git/root/...`; need
+  `MSYS_NO_PATHCONV=1` and `MSYS2_ARG_CONV_EXCL="*"` in env.
+- Modal CLI on Windows hits a charmap codec on the ✓ glyph; need
+  `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
+- Windows `MAX_PATH=260` blew up `modal volume get` for the long turnkv result
+  subdir name; pulled per-shard `predictions.jsonl` into a flat dir under
+  `E:\sm\t-flat\` instead.
+
+---
+
 ## 2026-04-23 — live_loop.py major expansion, Modal rewrite, flashdecode tracking — @yagneek
 
 Large batch of ConvCodeWorld infrastructure work landed today (all unstaged, branch `liveloop`):

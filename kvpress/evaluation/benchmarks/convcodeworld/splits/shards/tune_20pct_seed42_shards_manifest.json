@@ -1,0 +1,68 @@
+{
+  "input": "E:\\15642_MLSys\\kvpress-multi-turn\\.claude\\worktrees\\liveloop-diag\\kvpress\\evaluation\\benchmarks\\convcodeworld\\splits\\tune_20pct_seed42.json",
+  "num_shards": 10,
+  "n_total": 228,
+  "stride_strategy": "interleaved (idx % num_shards)",
+  "shards": [
+    {
+      "shard": 0,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_0_of_10.json",
+      "sha256": "fa277001e9595c63210a1cb51ef70b9f5263d745492c34055817fbb8ac56d395"
+    },
+    {
+      "shard": 1,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_1_of_10.json",
+      "sha256": "9c6c290f7b3c4e57efd42e1fca9382549ca4e7c37c16ca396237fd15a79e032c"
+    },
+    {
+      "shard": 2,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_2_of_10.json",
+      "sha256": "2c46934a2b438bfd3eb31730ec1bfef6c8621a87ab19738b8e89da7b0bd70b03"
+    },
+    {
+      "shard": 3,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_3_of_10.json",
+      "sha256": "33c538420fcc4ac5671d1cde464234040afcbc547cddb11535851a547911afaf"
+    },
+    {
+      "shard": 4,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_4_of_10.json",
+      "sha256": "4b2f3bf408aab6f8d9a54464465cb0c606e21e6b03317c0a4884dd8f825126be"
+    },
+    {
+      "shard": 5,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_5_of_10.json",
+      "sha256": "584aa072e5dea310beac49b3409df726e77ba03fe7e01d09b1ad88ef320dd484"
+    },
+    {
+      "shard": 6,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_6_of_10.json",
+      "sha256": "05429f280464f82bf4f827d081cbe2233d18b3afb068e30d8bf836e8485f8b27"
+    },
+    {
+      "shard": 7,
+      "size": 23,
+      "path": "tune_20pct_seed42_shard_7_of_10.json",
+      "sha256": "132f29ccf46c7691bfc72deb082b9bcba66b2322685b35ed6f9546602f98ac17"
+    },
+    {
+      "shard": 8,
+      "size": 22,
+      "path": "tune_20pct_seed42_shard_8_of_10.json",
+      "sha256": "8e016cf7959fbec933fa33e8753b1795d1607638c8f49575e81b750fa613a30e"
+    },
+    {
+      "shard": 9,
+      "size": 22,
+      "path": "tune_20pct_seed42_shard_9_of_10.json",
+      "sha256": "4f59f2e9bbfeee927d3757980d4af7de7abfbdc2f7599d37c58b58e12180b289"
+    }
+  ]
+}

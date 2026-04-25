@@ -1,0 +1,14 @@
+{
+  "dataset": "ConvCodeWorld/convcodebench",
+  "feedback_config": "CF_EF_UNIT_SNF",
+  "seed": 42,
+  "tune_fraction": 0.2,
+  "n_total": 1140,
+  "n_tune": 228,
+  "n_holdout": 912,
+  "tune_path": "tune_20pct_seed42.json",
+  "holdout_path": "holdout_80pct_seed42.json",
+  "tune_sha256": "b7aabf5e991b5b70b3e2aed03ae2ed483363e5fe30e4378bd574db749b33b923",
+  "holdout_sha256": "79bb3f3f8f1f60b4470b235add30b1fb9e98edbe9c8f77c104a1b6175aa16eae",
+  "stratification": "none (random sampling, sorted-lexicographic universe)"
+}

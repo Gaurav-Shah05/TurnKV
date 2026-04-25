@@ -612,9 +612,27 @@ def _load_reference_trajectories(feedback_config: str) -> dict[str, list[dict[st
 
 
 def _parse_task_ids(value: str | None) -> set[str] | None:
+    """
+    Accept either a comma-separated list of task IDs, or '@<path>' to load a
+    JSON list of task IDs (e.g. the splits we keep under benchmarks/convcodeworld/splits/).
+
+    Returns None when the input is empty, signalling 'no explicit override'.
+    """
     if value is None or value.strip() == "":
         return None
-    return {x.strip() for x in value.split(",") if x.strip()}
+    text = value.strip()
+    if text.startswith("@"):
+        path = Path(text[1:]).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"task_ids @<path> points to missing file: {path}")
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, list) or not all(isinstance(x, (str, int)) for x in data):
+            raise ValueError(
+                f"task_ids @<path> file {path} must be a JSON list of strings/ints, got {type(data).__name__}"
+            )
+        return {str(x).strip() for x in data if str(x).strip()}
+    return {x.strip() for x in text.split(",") if x.strip()}
 
 
 def _slug_value(value: Any) -> str:
