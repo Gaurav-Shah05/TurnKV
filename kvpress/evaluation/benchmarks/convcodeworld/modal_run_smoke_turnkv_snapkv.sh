@@ -29,6 +29,9 @@ FLOOR_GAMMA="${FLOOR_GAMMA:-0.1}"
 ANCHOR_BETA="${ANCHOR_BETA:-0.25}"
 LOYALTY_TOP_P="${LOYALTY_TOP_P:-0.25}"
 LOYALTY_UPDATE_EVERY="${LOYALTY_UPDATE_EVERY:-5}"
+# Cache budgets — override for budget sweeps.
+GLOBAL_BUDGET="${GLOBAL_BUDGET:-4096}"
+LOCAL_BUDGET="${LOCAL_BUDGET:-2048}"
 # Optional label that gets baked into the output_subdir + log filename so
 # multiple ablation runs don't collide on the Modal volume. e.g. "loyaltyonly".
 CONFIG_LABEL="${CONFIG_LABEL:-}"
@@ -85,8 +88,8 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     --feedback-config CF_EF_UNIT_SNF
     --press-name turnkv_snapkv
     --compression-ratio 0.0
-    --global-budget 4096
-    --local-budget 2048
+    --global-budget "$GLOBAL_BUDGET"
+    --local-budget "$LOCAL_BUDGET"
     --max-turns 10
     --max-new-tokens 1024
     --num-eval-examples 0

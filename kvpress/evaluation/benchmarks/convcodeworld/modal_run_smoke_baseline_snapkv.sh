@@ -18,6 +18,12 @@ NUM_SHARDS="${NUM_SHARDS:-10}"
 # or "live" (model's own generated code is the prior context per iter; needs the
 # feedback model + executor sandbox).
 BENCHMARK_MODE="${BENCHMARK_MODE:-static}"
+# Cache budgets — override for budget sweeps.
+GLOBAL_BUDGET="${GLOBAL_BUDGET:-4096}"
+LOCAL_BUDGET="${LOCAL_BUDGET:-2048}"
+# Optional label baked into output_subdir + log filename so multiple runs
+# with different budgets / configs don't collide on the Modal volume.
+CONFIG_LABEL="${CONFIG_LABEL:-}"
 SHARD_DIR="$script_dir/splits/shards"
 SHARD_STEM="tune_20pct_seed42"
 
@@ -43,9 +49,15 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 LOG_DIR="$script_dir/../../../../.modal_diag"
 mkdir -p "$LOG_DIR"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-RUN_TAG="baseline_snapkv_${BENCHMARK_MODE}_smoke"
-INDEX_FILE="$LOG_DIR/smoke_baseline_snapkv_${BENCHMARK_MODE}_${RUN_TS}_index.txt"
-echo "# baseline_snapkv smoke - mode=$BENCHMARK_MODE profile=$MODAL_PROFILE - $RUN_TS" > "$INDEX_FILE"
+if [[ -n "$CONFIG_LABEL" ]]; then
+  RUN_TAG="baseline_snapkv_${CONFIG_LABEL}_${BENCHMARK_MODE}_smoke"
+  LOG_PREFIX="smoke_baseline_snapkv_${CONFIG_LABEL}_${BENCHMARK_MODE}"
+else
+  RUN_TAG="baseline_snapkv_${BENCHMARK_MODE}_smoke"
+  LOG_PREFIX="smoke_baseline_snapkv_${BENCHMARK_MODE}"
+fi
+INDEX_FILE="$LOG_DIR/${LOG_PREFIX}_${RUN_TS}_index.txt"
+echo "# baseline_snapkv smoke - mode=$BENCHMARK_MODE label='$CONFIG_LABEL' profile=$MODAL_PROFILE budget=$GLOBAL_BUDGET/$LOCAL_BUDGET - $RUN_TS" > "$INDEX_FILE"
 
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   shard_json="$SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
@@ -55,7 +67,7 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   fi
   shard_json_container="$CONTAINER_SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
   output_subdir="${RUN_TAG}_${RUN_TS}/shard_${shard}_of_${NUM_SHARDS}"
-  log_file="$LOG_DIR/smoke_baseline_snapkv_${BENCHMARK_MODE}_${RUN_TS}_shard${shard}.log"
+  log_file="$LOG_DIR/${LOG_PREFIX}_${RUN_TS}_shard${shard}.log"
 
   shard_args=(
     evaluation/benchmarks/convcodeworld/modal_app.py::run_convcodeworld_live
@@ -65,8 +77,8 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     --feedback-config CF_EF_UNIT_SNF
     --press-name snapkv
     --compression-ratio 0.0
-    --global-budget 4096
-    --local-budget 2048
+    --global-budget "$GLOBAL_BUDGET"
+    --local-budget "$LOCAL_BUDGET"
     --max-turns 10
     --max-new-tokens 1024
     --num-eval-examples 0

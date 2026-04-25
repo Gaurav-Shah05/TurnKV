@@ -10,6 +10,51 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-25 — smoke #4: budget sweep — Loyalty-only beats SnapKV at budget=1024 — @gaurav
+
+After three smokes ties at `global=4096`, ran a budget sweep on the same
+228-task tune split: baseline + Loyalty-only at global = 4096 / 2048 / 1024.
+Hypothesis: at 4096 the eviction is too gentle to differentiate ANY strategy.
+40 detached H100 shards on `gauravmshah2004` in parallel, finished in ~54 min.
+
+**First winning configuration on this project**: Loyalty-only beats baseline
+SnapKV by **+1.75 pp recall at budget=1024** (33.33 vs 31.58). At 2048
+SnapKV peaks (35.09 — better than 4096!) and Loyalty regresses −1.32. At 4096
+they bit-tie at 34.65.
+
+The mechanism is structural and lives in compile errors:
+```
+compile_error counts
+                B-4096  L-4096  B-2048  L-2048  B-1024  L-1024
+                    96       3     230      21     343      17
+```
+SnapKV's compile errors **3.6×** at budget=1024 vs 4096 (96 → 343), while
+Loyalty stays flat (3 → 17). The data-driven retention is preserving
+imports / function signatures / indentation that SnapKV evicts as it gets
+aggressive. The +13 timeout regression we worried about at budget=4096 turns
+out to be budget-specific noise — zero timeouts for Loyalty at budget=1024.
+
+The unexpected finding: **baseline SnapKV peaks at budget=2048, not 4096**
+(35.09 > 34.65). Less context helps the model — at 4096 the prefill has
+noisy intermediate-iteration tokens that distract more than they help.
+Compression to 2048 happens to evict mostly noise. At 2048 specifically,
+Loyalty's "always-keep top 25%" pulls noise back in and regresses by 1.32 pp.
+
+Reading: **TurnKV's value lives in the budget-constrained regime.** At
+generous budgets both presses tie. At tight budgets (where you actually need
+KV compression) Loyalty's data-driven retention beats SnapKV's
+positional/attention scoring. The crossover on this benchmark is between
+1024 and 2048.
+
+This is now a paper-worthy result. Next step: extend the sweep to budget=
+512 and 768 to characterize the gap, plus re-run α=(1,1,1) at budget=1024 to
+test whether the heuristic policies add anything once eviction is binding.
+
+Smoke #4 writeup: `context/experiments/004-smoke-tune20-budget-sweep-live.md`.
+Metrics: `context/experiments/smoke_004_tune20_budget_sweep_live/metrics.json`.
+
+---
+
 ## 2026-04-25 — smoke #3: Loyalty-only (α=0,0,1) ties baseline exactly — @gaurav
 
 Picked Loyalty-only as the highest-EV α-ablation: smoke #2's status-mix story
