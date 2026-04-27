@@ -1,0 +1,68 @@
+{
+  "input": "/ssd1/ypatlola/15442/final_project/TurnKV/kvpress/evaluation/benchmarks/convcodeworld/splits/tune_100tasks_seed42.json",
+  "num_shards": 10,
+  "n_total": 100,
+  "stride_strategy": "interleaved (idx % num_shards)",
+  "shards": [
+    {
+      "shard": 0,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_0_of_10.json",
+      "sha256": "18a224a658330b116dacb7bd8b78e1565bcdab41565452c9005f77168617b5d5"
+    },
+    {
+      "shard": 1,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_1_of_10.json",
+      "sha256": "9e40eff12d57c359e0a0c88c67d027cb1eb0339e46dc3695136d23df393cf24a"
+    },
+    {
+      "shard": 2,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_2_of_10.json",
+      "sha256": "3724c16b3c3a797f26342861aa141458cdb50bfbc9452557706abe86d042156c"
+    },
+    {
+      "shard": 3,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_3_of_10.json",
+      "sha256": "33d9b356ca8594133a7297ba7f491c7fde9239ae4bb49050ad8363a4d9982db7"
+    },
+    {
+      "shard": 4,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_4_of_10.json",
+      "sha256": "285e2c181d07f950a93b749962e1b96805bbbb1c0c3846bc7eaf225bf5bc3c26"
+    },
+    {
+      "shard": 5,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_5_of_10.json",
+      "sha256": "3438c406bf118ac7f3adda91e26491db8b825dc27ccdf60924f439b0726c97dd"
+    },
+    {
+      "shard": 6,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_6_of_10.json",
+      "sha256": "6e064d8e9db3bcbb9ea9ce53ecc2afeb928709601fcaf247d0d179cf063035c1"
+    },
+    {
+      "shard": 7,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_7_of_10.json",
+      "sha256": "33e958f60f4e357960088b38616b08b18348e353f956c418fc95d98543189a92"
+    },
+    {
+      "shard": 8,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_8_of_10.json",
+      "sha256": "b8f10bbc10f1f2167240f20be4725c512347fedc3e369db8da4416f082d07d5d"
+    },
+    {
+      "shard": 9,
+      "size": 10,
+      "path": "tune_100tasks_seed42_shard_9_of_10.json",
+      "sha256": "b38ccbb8ed81086ea1d528ccf7fee22c99ec52322fc3ab97823e5b8a2fbecc0b"
+    }
+  ]
+}

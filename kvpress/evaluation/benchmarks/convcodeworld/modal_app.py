@@ -49,6 +49,14 @@ MODAL_EVAL_REQUIREMENTS = (
     "pandas>=2.2.2,<3",
     "accelerate>=1.0.0,<2",
     "requests>=2.32.3,<3",
+    "beautifulsoup4>=4.12.3,<5",
+    "faker>=25.0.0,<40",
+    "natsort>=8.4.0,<9",
+    "openpyxl>=3.1.5,<4",
+    "scikit-learn>=1.5.0,<2",
+    "seaborn>=0.13.2,<0.14",
+    "statsmodels>=0.14.2,<0.15",
+    "xlsxwriter>=3.2.0,<4",
     "cachetools>=5.5.2,<6",
     "fire>=0.6.0,<0.7",
     "rouge>=1.0.1,<2",
@@ -92,7 +100,7 @@ def _container_eval_python() -> str:
 
 base_image = (
     modal.Image.from_registry(CUDA_BASE_IMAGE, add_python="3.11")
-    .apt_install("git", "curl", "util-linux", "build-essential", "ninja-build")
+    .apt_install("git", "curl", "util-linux", "build-essential", "ninja-build", "r-base-core")
     .pip_install("uv")
     .workdir("/root/kvpress")
     .run_commands("uv venv /root/kvpress/.venv")
@@ -298,6 +306,7 @@ def run_convcodeworld_live(
     task_ids: Optional[str] = None,
     max_turns: int = 10,
     max_new_tokens: int = 1024,
+    code_generation_until_eos: bool = False,
     verbal_feedback_max_new_tokens: int = 256,
     global_budget: int = 4500,
     local_budget: int = 4096,
@@ -364,6 +373,7 @@ def run_convcodeworld_live(
         f"--fraction={fraction}",
         f"--max_turns={max_turns}",
         f"--max_new_tokens={max_new_tokens}",
+        f"--code_generation_until_eos={code_generation_until_eos}",
         f"--verbal_feedback_max_new_tokens={verbal_feedback_max_new_tokens}",
         f"--global_budget={global_budget}",
         f"--local_budget={local_budget}",
@@ -453,6 +463,7 @@ def main(
     task_ids: Optional[str] = None,
     max_turns: int = 10,
     max_new_tokens: int = 1024,
+    code_generation_until_eos: bool = False,
     verbal_feedback_max_new_tokens: int = 256,
     global_budget: int = 4500,
     local_budget: int = 4096,
@@ -504,6 +515,7 @@ def main(
             task_ids=task_ids,
             max_turns=max_turns,
             max_new_tokens=max_new_tokens,
+            code_generation_until_eos=code_generation_until_eos,
             verbal_feedback_max_new_tokens=verbal_feedback_max_new_tokens,
             global_budget=global_budget,
             local_budget=local_budget,

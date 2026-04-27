@@ -22,6 +22,19 @@ from typing import Any, Mapping
 NO_SYNTAX_ERRORS = "No syntax errors"
 PASSED_ALL_TEST_RUNS = "Passed all test runs"
 _BYTE_LEVEL_ARTIFACTS = str.maketrans({"Ċ": "\n", "Ġ": " ", "ĉ": "\t"})
+_SUBPROCESS_THREAD_ENV = {
+    # Modal H100 workers expose many CPU cores. NumPy/SciPy/OpenBLAS will
+    # otherwise try to initialize a large native thread pool inside the
+    # generated-code subprocess, which can fail under the executor's memory
+    # rlimit before candidate code actually runs.
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "GOTO_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "BLIS_NUM_THREADS": "1",
+}
 
 
 @dataclass
@@ -161,6 +174,19 @@ def _limit_resources(memory_mb: int, cpu_seconds: int) -> None:
         resource.setrlimit(resource.RLIMIT_CPU, (int(cpu_seconds), int(cpu_seconds) + 1))
 
 
+def _subprocess_env() -> dict[str, str]:
+    path_parts = [str(Path(sys.executable).parent)]
+    existing_path = os.environ.get("PATH", "")
+    if existing_path:
+        path_parts.append(existing_path)
+    return {
+        **_SUBPROCESS_THREAD_ENV,
+        "PATH": os.pathsep.join(path_parts),
+        "PYTHONNOUSERSITE": "1",
+        "MPLBACKEND": "Agg",
+    }
+
+
 @lru_cache(maxsize=1)
 def _can_unshare_network() -> bool:
     if os.name != "posix" or shutil.which("unshare") is None:
@@ -201,7 +227,7 @@ def run_candidate(
         )
 
     script = build_test_script(task, candidate_code)
-    env = {"PYTHONNOUSERSITE": "1", "MPLBACKEND": "Agg"}
+    env = _subprocess_env()
     use_unshare = network_isolation == "unshare" or (network_isolation == "auto" and _can_unshare_network())
 
     with tempfile.TemporaryDirectory(dir=str(work_dir) if work_dir else None) as tmp:

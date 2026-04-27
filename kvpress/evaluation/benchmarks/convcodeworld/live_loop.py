@@ -129,6 +129,7 @@ class ConvCodeWorldLiveConfig:
     # fake future iterations after it finishes the real code. Bump back to
     # 1024 if a task genuinely needs more tokens.
     max_new_tokens: int = 512
+    code_generation_until_eos: bool = False
     verbal_feedback_max_new_tokens: int = 256
     num_eval_examples: int = 1
     fraction: float = 1.0
@@ -754,7 +755,7 @@ def _generate_after_prompt(
     cache: DynamicCache,
     prompt: str,
     *,
-    max_new_tokens: int,
+    max_new_tokens: Optional[int],
     decode_press: AnswerSuffixDecodingPress | None,
     stop_sequences: Iterable[str] = DEFAULT_STOP_SEQUENCES,
     prompt_ids: Optional[list[int]] = None,
@@ -790,9 +791,11 @@ def _generate_after_prompt(
     if require_flashdecode:
         reset_flashdecode_tracking(model)
     with ctx:
-        for _ in range(max_new_tokens):
+        generated_count = 0
+        while max_new_tokens is None or generated_count < max_new_tokens:
             token_id = int(next_token.item())
             generated_ids.append(token_id)
+            generated_count += 1
             token_tensor = next_token.reshape(1, 1)
             pos = torch.tensor([[cache.get_seq_length()]], dtype=torch.long, device=device)
             outputs = _model_forward(
@@ -933,8 +936,10 @@ def _simulator_prompt(task: dict[str, Any], code: str, result, cfg: ConvCodeWorl
     return (
         "You are a ConvCodeWorld feedback simulator.\n"
         f"Act as {audience} reviewing the previous Python solution.\n"
-        "Return concise verbal feedback for the next coding turn.\n"
-        "Do not write revised code. Do not include chain-of-thought. Do not mention hidden tests.\n"
+        "Return 2-4 complete sentences of actionable verbal feedback for the next coding turn.\n"
+        "Be specific: mention the failing behavior, what the tests expected instead, and the concrete area to change.\n"
+        "Avoid vague feedback such as 'fix the error' or 'check the title'. Do not write revised code, bullets, "
+        "chain-of-thought, or hidden-test claims.\n"
         "\n### Task\n"
         f"{_clip(task_prompt)}\n"
         "\n### Previous Code\n"
@@ -982,20 +987,55 @@ def _last_error_line(text: str) -> str:
     return ""
 
 
+def _failed_test_summary(text: str, *, max_cases: int = 3) -> str:
+    cases: list[str] = []
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if " ... FAIL" in line or " ... ERROR" in line:
+            case = line.split(" ... ", 1)[0].strip()
+            if case and case not in cases:
+                cases.append(case)
+        if len(cases) >= max_cases:
+            break
+    if not cases:
+        return ""
+    suffix = "" if len(cases) == 1 else "s"
+    return f"failing test case{suffix}: " + ", ".join(cases)
+
+
 def _fallback_verbal_feedback(result) -> str:
     if result.passed:
         return "The previous code passed the available tests. Stop the live loop."
     if result.status == "compile_error":
         summary = _last_error_line(result.compilation_feedback)
         if summary:
-            return f"Fix the compilation failure: {summary}. Preserve the required function signature."
-        return "Fix the compilation failure and preserve the required function signature."
+            return (
+                f"The solution does not compile; the compiler reports: {summary}. "
+                "Revise the implementation so all required names are defined/imported, keep the required function "
+                "signature unchanged, and then re-run the tests."
+            )
+        return (
+            "The solution does not compile. Fix the syntax/import/name issue, preserve the required function "
+            "signature, and make sure the function can be imported by the test harness."
+        )
     if result.status == "timeout":
-        return "The candidate timed out. Reduce the algorithmic complexity or remove non-terminating work."
+        return (
+            "The candidate timed out before the tests completed. Reduce unnecessary work or non-terminating loops, "
+            "handle edge cases directly, and keep the implementation bounded for the tested input sizes."
+        )
     summary = _last_error_line(result.execution_feedback)
+    cases = _failed_test_summary(result.execution_feedback)
     if summary:
-        return f"The tests fail with {summary}. Fix that behavior while preserving the required function signature."
-    return "Use the failing test output to fix the implementation while preserving the required function signature."
+        case_text = f" The relevant {cases} show where to focus." if cases else ""
+        return (
+            f"The implementation still fails the available tests: {summary}.{case_text} "
+            "Compare the actual value in the traceback with the expected value, adjust the function logic for that "
+            "behavior, and preserve the required function signature."
+        )
+    return (
+        "The implementation still fails the available tests. Use the failing unittest output to identify the expected "
+        "behavior, update only the function logic needed for that behavior, and preserve the required signature."
+    )
 
 
 def _format_feedback_prompt(tokenizer, prompt: str) -> str:
@@ -1028,6 +1068,9 @@ def _simulate_verbal_feedback(model, tokenizer, task: dict[str, Any], code: str,
     feedback = _clean_simulator_feedback(raw)
     if _is_degenerate_feedback(feedback):
         logger.warning("Feedback model output was degenerate; using deterministic feedback fallback.")
+        return _fallback_verbal_feedback(result)
+    if not result.passed and len(feedback.split()) < 30:
+        logger.warning("Feedback model output was too short; using deterministic feedback fallback.")
         return _fallback_verbal_feedback(result)
     return feedback
 
@@ -1140,6 +1183,9 @@ class ConvCodeWorldLiveRunner:
         torch.manual_seed(self.cfg.seed)
         self.output_dir = _results_dir(self.cfg)
         self.global_target = _target_from_ratio(self.cfg.global_budget, self.cfg.compression_ratio)
+
+    def _code_generation_limit(self) -> int | None:
+        return None if self.cfg.code_generation_until_eos else self.cfg.max_new_tokens
 
     def _load_tokenizer(self, model_name: str):
         try:
@@ -1320,11 +1366,12 @@ class ConvCodeWorldLiveRunner:
                 logger.info("Starting task %s iteration %s", task_get(task, "task_id"), iteration)
                 prompt = _revision_prompt(iteration, feedback)
                 prompt_ids = _encode(tokenizer, prompt)
-                if self.cfg.error_on_kv_cache_vram_exhaustion:
+                code_generation_limit = self._code_generation_limit()
+                if self.cfg.error_on_kv_cache_vram_exhaustion and code_generation_limit is not None:
                     _assert_kv_cache_fits_available_vram(
                         model,
                         cache,
-                        len(prompt_ids) + self.cfg.max_new_tokens,
+                        len(prompt_ids) + code_generation_limit,
                         label=f"task {task_get(task, 'task_id')} iteration {iteration}",
                     )
                 if global_press is not None:
@@ -1336,7 +1383,8 @@ class ConvCodeWorldLiveRunner:
                 if (
                     not self.cfg.full_kv_cache
                     and scorer is not None
-                    and self.cfg.max_new_tokens > self.cfg.local_budget
+                    and code_generation_limit is not None
+                    and code_generation_limit > self.cfg.local_budget
                 ):
                     decode_press = AnswerSuffixDecodingPress(
                         base_press=scorer,
@@ -1350,7 +1398,7 @@ class ConvCodeWorldLiveRunner:
                     tokenizer,
                     cache,
                     prompt,
-                    max_new_tokens=self.cfg.max_new_tokens,
+                    max_new_tokens=code_generation_limit,
                     decode_press=decode_press,
                     prompt_ids=prompt_ids,
                     require_flashdecode=self.cfg.require_flashdecode,
@@ -1508,6 +1556,7 @@ class ConvCodeWorldLiveRunner:
                 logger.info("Starting static task %s iteration %s", task_id, iteration)
                 prompt = _revision_prompt(iteration, feedback)
                 prompt_ids = _encode(tokenizer, prompt)
+                code_generation_limit = self._code_generation_limit()
                 if global_press is not None:
                     global_press.on_turn_start(iteration, "user", cache.get_seq_length())
                 user_start = cache.get_seq_length()
@@ -1517,7 +1566,8 @@ class ConvCodeWorldLiveRunner:
                 if (
                     not self.cfg.full_kv_cache
                     and scorer is not None
-                    and self.cfg.max_new_tokens > self.cfg.local_budget
+                    and code_generation_limit is not None
+                    and code_generation_limit > self.cfg.local_budget
                 ):
                     decode_press = AnswerSuffixDecodingPress(
                         base_press=scorer,
@@ -1531,7 +1581,7 @@ class ConvCodeWorldLiveRunner:
                     tokenizer,
                     cache,
                     prompt,
-                    max_new_tokens=self.cfg.max_new_tokens,
+                    max_new_tokens=code_generation_limit,
                     decode_press=decode_press,
                     prompt_ids=prompt_ids,
                     require_flashdecode=self.cfg.require_flashdecode,

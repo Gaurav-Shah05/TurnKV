@@ -1,0 +1,10 @@
+{
+  "source_split": "tune_20pct_seed42.json",
+  "source_n": 228,
+  "output_split": "tune_100tasks_seed42.json",
+  "output_n": 100,
+  "seed": 42,
+  "selection": "random.sample(source_split, 100), then preserve source split order",
+  "source_sha256": "b7aabf5e991b5b70b3e2aed03ae2ed483363e5fe30e4378bd574db749b33b923",
+  "output_sha256": "0c09b622282659432917bccb159a60459c05d991696d9a0c0839736a5421f803"
+}
