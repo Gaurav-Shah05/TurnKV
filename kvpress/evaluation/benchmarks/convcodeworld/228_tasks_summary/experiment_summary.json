@@ -1,0 +1,168 @@
+{
+  "metadata": {
+    "purpose": "TurnKV-specific hyperparameter ablation for final pass rate optimization on ConvCodeWorld.",
+    "baseline_source": "modal_run_smoke_baseline_snapkv.sh"
+  },
+  "fixed_non_turnkv_args": {
+    "--global-budget": 2048,
+    "--local-budget": 1536,
+    "--max-new-tokens": 2048,
+    "--compression-ratio": 0.5
+  },
+  "configs": [
+    {
+      "CONFIG_LABEL": "no_press_global4096_local2048_maxtokens1024_compressratio0.0_split228",
+      "args": {
+        "--press-name": "no_press",
+        "--full-kv-cache": true,
+        "--compression-ratio": 0.0,
+        "--code-generation-until-eos": true
+      },
+      "average_final_pass_rate": 67.13615023474179,
+      "average_turns_to_first_pass": 2.0,
+      "failed_tasks": 70,
+      "passed_tasks": 143,
+      "total_tasks": 213,
+      "global_cache_per_task": {
+        "average": 4280.521126760564,
+        "median": 1725,
+        "max": 18931
+      },
+      "local_cache_per_turn": {
+        "average": 929.4097859327217,
+        "median": 832,
+        "max": 2168
+      }
+    },
+    {
+      "CONFIG_LABEL": "baseline_snapkv_global2048_local1536_maxtokens2048_compressratio0.5_split228",
+      "args": {
+        "--press-name": "snapkv",
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5
+      },
+      "average_final_pass_rate": 60.08771929824562,
+      "average_turns_to_first_pass": 1.7956204379562044,
+      "failed_tasks": 91,
+      "passed_tasks": 137,
+      "total_tasks": 228
+    },
+    {
+      "CONFIG_LABEL": "turnkv_ref_allon_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 1.0,
+        "--alpha-anchor": 1.0,
+        "--alpha-loyalty": 1.0,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.3,
+        "--min-floor-tokens": 5,
+        "--anchor-beta": 0.25,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      },
+      "average_final_pass_rate": 65.35087719298245,
+      "average_turns_to_first_pass": 1.9932885906040267,
+      "failed_tasks": 79,
+      "passed_tasks": 149,
+      "total_tasks": 228
+    },
+    {
+      "CONFIG_LABEL": "turnkv_floorheavy_recent_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 1.5,
+        "--alpha-anchor": 0.8,
+        "--alpha-loyalty": 0.8,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.45,
+        "--min-floor-tokens": 8,
+        "--anchor-beta": 0.2,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      },
+      "average_final_pass_rate": 65.35087719298245,
+      "average_turns_to_first_pass": 2.1006711409395975,
+      "failed_tasks": 79,
+      "passed_tasks": 149,
+      "total_tasks": 228
+    },
+    {
+      "CONFIG_LABEL": "turnkv_anchorheavy_intent_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.8,
+        "--alpha-anchor": 1.5,
+        "--alpha-loyalty": 0.8,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.25,
+        "--min-floor-tokens": 5,
+        "--anchor-beta": 0.35,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      },
+      "average_final_pass_rate": 65.35087719298245,
+      "average_turns_to_first_pass": 1.8724832214765101,
+      "failed_tasks": 79,
+      "passed_tasks": 149,
+      "total_tasks": 228
+    },
+    {
+      "CONFIG_LABEL": "turnkv_loyaltyheavy_fast_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.7,
+        "--alpha-anchor": 0.8,
+        "--alpha-loyalty": 1.5,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.2,
+        "--min-floor-tokens": 4,
+        "--anchor-beta": 0.2,
+        "--loyalty-top-p": 0.35,
+        "--loyalty-update-every": 3
+      },
+      "average_final_pass_rate": 64.47368421052632,
+      "average_turns_to_first_pass": 1.965986394557823,
+      "failed_tasks": 81,
+      "passed_tasks": 147,
+      "total_tasks": 228
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_balanced_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.5,
+        "--alpha-anchor": 0.5,
+        "--alpha-loyalty": 0.5,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.2,
+        "--min-floor-tokens": 3,
+        "--anchor-beta": 0.15,
+        "--loyalty-top-p": 0.2,
+        "--loyalty-update-every": 5
+      },
+      "average_final_pass_rate": 68.42105263157895,
+      "average_turns_to_first_pass": 2.230769230769231,
+      "failed_tasks": 72,
+      "passed_tasks": 156,
+      "total_tasks": 228
+    }
+  ]
+}

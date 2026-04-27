@@ -1,0 +1,18 @@
+{
+  "_note": "Placeholder manifest. Regenerate with: python scripts/build_split.py && python scripts/build_shards.py --input splits/tune_20pct_seed42.json --num-shards 10. The build_split.py invocation requires HF access to facebook/collaborative_agent_bench (the ColBench Backend dataset).",
+  "dataset": "facebook/collaborative_agent_bench",
+  "subset": "backend",
+  "hf_split": "train",
+  "seed": 42,
+  "tune_fraction": 0.20,
+  "expected_outputs": [
+    "tune_20pct_seed42.json",
+    "tune_20pct_seed42_manifest.json (written by build_split.py rerun)",
+    "tune_100tasks_seed42.json (manually subsetted from tune_20pct_seed42.json)",
+    "tune_100tasks_seed42_manifest.json",
+    "holdout_80pct_seed42.json",
+    "shards/<stem>_shard_<i>_of_10.json (10 files per stem)",
+    "shards/<stem>_shards_manifest.json"
+  ],
+  "stratification": "none (random sampling, sorted-lexicographic universe)"
+}

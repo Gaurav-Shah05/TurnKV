@@ -57,12 +57,13 @@ Any code change — new press class, metric tweak, eval harness, test — happen
 3. PR into `main`; `make test` must pass.
 4. Log observations to `documentation/journal.md` as you go. Promote to `documentation/findings.md` when consolidated.
 
-### Benchmark scaffolding status (as of 2026-04-23)
+### Benchmark scaffolding status (as of 2026-04-27)
 
 | Benchmark | Status | Location |
 |-----------|--------|----------|
 | SCBench | Scaffolded (loader + metrics + flattening script). Demoted to appendix — see `documentation/findings.md`. | `kvpress/evaluation/benchmarks/scbench/` |
 | ConvCodeWorld | Scaffolded. `live_loop.py` fully expanded: static-replay + live-loop modes, VRAM guards, FA3 flashdecode tracking, tokenizer-artefact normalisation, compilable-prefix fallback. `modal_app.py` rewritten with extracted constants + reproducible FA3 build layer. `modal_run.sh` rewritten. `MODAL_HYPERPARAMS.md` added. `executor.py` has `normalize_tokenizer_artifacts`, `normalize_candidate_code`, `_longest_compilable_prefix`. | `kvpress/evaluation/benchmarks/convcodeworld/` |
+| ColBench (Backend) | Scaffolded 2026-04-27. Live-only mode (no reference dialogues upstream). Reuses convcodeworld's Modal image (CUDA 12.9.1 + Torch 2.8.0 + vLLM nightly + FA3 v2.8.3 Hopper wheel + pinned Transformers commit) and dual-model setup (DeepSeek-R1-Distill-Llama-8B agent + Gemma4-26B-A4B-it human-simulator over vLLM Triton). New harness with question-or-submit two-role schema, submission detector, and forced-submit-on-final-turn budget. Three smoke scripts mirror convcodeworld's no_press / baseline_snapkv / turnkv_snapkv pattern; smoke #1 deliberately runs **live** (not static — ColBench has no reference dialogues). Splits + shards must be regenerated locally before first smoke (placeholder `splits/split_manifest.json` only). | `kvpress/evaluation/benchmarks/colbench/` |
 | LongMemEval | **Not yet scaffolded.** Primary conversational. Reuse EpiCache's `data/longmemeval/convert_longmemeval.py` as the data-prep entry point. | TBD `kvpress/evaluation/benchmarks/longmemeval/` |
 | TopiOCQA | **Not yet scaffolded.** Topic-shift validation. Load via `datasets.load_dataset("McGill-NLP/TopiOCQA", "plain_text")`. | TBD `kvpress/evaluation/benchmarks/topiocqa/` |
 

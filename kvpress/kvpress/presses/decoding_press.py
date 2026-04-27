@@ -143,6 +143,7 @@ class DecodingPress(BasePress):
 
             cache_layer = cache.layers[module.layer_idx]
             keys, values = extract_keys_and_values(cache, module.layer_idx)
+            cache_len_before = keys.shape[2]
 
             # Get attention weights from output
             attentions = output[1] if len(output) > 1 and output[1] is not None else None
@@ -150,7 +151,7 @@ class DecodingPress(BasePress):
             # Apply compression using buffered hidden states for this layer
             buffered_hidden_states = torch.cat(self.hidden_states_buffer[layer_idx], dim=1)
             keys, values = self.compress(module, buffered_hidden_states, keys, values, attentions, kwargs)
-            logger.debug(f"Applied decoding compression: " f"keys.shape: {keys.shape}, values.shape: {values.shape}")
+            cache_len_after = keys.shape[2]
 
             # Update cache with compressed keys and values
             if isinstance(cache, QuantizedCache):
@@ -162,6 +163,17 @@ class DecodingPress(BasePress):
             else:
                 cache_layer.keys = keys
                 cache_layer.values = values
+
+            if cache_len_after != cache_len_before:
+                logger.info(
+                    "Applied local decoding compression: layer=%s cache=%s->%s target=%s interval=%s",
+                    layer_idx,
+                    cache_len_before,
+                    cache_len_after,
+                    self.target_size,
+                    self.compression_interval,
+                )
+            logger.debug("Applied decoding compression: keys.shape: %s, values.shape: %s", keys.shape, values.shape)
 
             # Reset step count and clear buffer for this layer
             self.layer_step_counts[layer_idx] = 0

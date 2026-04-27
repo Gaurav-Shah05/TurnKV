@@ -10,6 +10,52 @@ body (1-N paragraphs)
 
 ---
 
+## 2026-04-27 — scaffolded ColBench (Backend) parallel to ConvCodeWorld — @yagneek
+
+Added `kvpress/evaluation/benchmarks/colbench/` mirroring the convcodeworld
+folder structure: `live_loop.py`, `executor.py`, `modal_app.py`,
+`calculate_metrics.py`, `create_huggingface_dataset.py`, `scripts/build_split.py`,
+`scripts/build_shards.py`, four shell dispatchers (`modal_run.sh` plus three
+smoke runs — no_press / baseline_snapkv / turnkv_snapkv), and three
+`README.md` / `MODAL_SETUP.md` / `MODAL_HYPERPARAMS.md` docs.
+
+ColBench (Meta FAIR's SWEET-RL, March 2025;
+`facebook/collaborative_agent_bench`) is a multi-turn coding benchmark
+where the agent solves a Python task by chatting with a *simulated human*
+(here: Gemma4-26B-A4B-it) that has access to the reference solution and
+hidden tests. Each turn the agent emits either a clarifying NL question
+or a final fenced ```python``` submission; the loop ends at first submit.
+
+Reuse strategy: the Modal image, vLLM Triton sidecar, FA3 flashdecode
+guards, KV-VRAM checks, press setup, turn-aware policy wiring, and
+`AnswerSuffixDecodingPress` glue are lifted from convcodeworld unchanged
+(duplicated across files for now; we'll factor into the shared multi-turn
+harness later, per ADR 001). What's new: the ColBench task schema (loader
+is field-name-resilient across `description`/`instruction`/`prompt` etc.),
+the agent system prompt that frames the agent-vs-non-coder-user
+collaboration, the `executor.detect_submission()` regex, the simulator
+prompt with reference-solution access (and explicit "do not reveal"
+instructions), and a forced-submit-on-final-turn safety net so the agent
+doesn't burn the entire budget on questions.
+
+Deliberate divergence from convcodeworld: smoke #1 (`baseline_snapkv`)
+runs in **live mode**, not static-replay. ColBench ships no reference
+dialogues, so static replay is not implementable — every run is a live
+loop. Documented in `MODAL_HYPERPARAMS.md` and the README.
+
+Out of scope for this scaffold: Frontend Design split (HTML/CSS, vision
+judge), unit tests under `kvpress/tests/colbench/`, factoring the live
+loop into a shared harness library. The split JSON files + shard JSONs
+are deliberately not committed; `splits/split_manifest.json` is a
+placeholder noting the regeneration command (running `build_split.py`
+requires HF access to the upstream dataset, which the scaffold-time
+environment may not have).
+
+Verification done so far: all five Python files compile (`python -m py_compile`)
+and shellcheck/`bash -n` is clean on the four shell scripts. End-to-end Modal
+smoke not yet run — pending dataset-access confirmation and a first build
+of the ColBench results volume.
+
 ## 2026-04-25 — smoke #4: budget sweep — Loyalty-only beats SnapKV at budget=1024 — @gaurav
 
 After three smokes ties at `global=4096`, ran a budget sweep on the same

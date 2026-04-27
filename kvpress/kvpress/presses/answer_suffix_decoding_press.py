@@ -163,10 +163,12 @@ class AnswerSuffixDecodingPress(BasePress):
         kwargs: dict[str, Any],
     ) -> None:
         start = self.answer_start_seq_len
+        cache_len_before = keys.shape[2]
         keys_pre = keys[:, :, :start, :]
         vals_pre = values[:, :, :start, :]
         keys_suf = keys[:, :, start:, :]
         vals_suf = values[:, :, start:, :]
+        suffix_len_before = keys_suf.shape[2]
 
         buf = self._hidden_buffer[layer_idx]
         if not buf:
@@ -178,6 +180,8 @@ class AnswerSuffixDecodingPress(BasePress):
         )
         new_keys = torch.cat([keys_pre, new_k_suf], dim=2)
         new_vals = torch.cat([vals_pre, new_v_suf], dim=2)
+        cache_len_after = new_keys.shape[2]
+        suffix_len_after = new_k_suf.shape[2]
 
         cache_layer = cache.layers[layer_idx]
         if isinstance(cache, QuantizedCache):
@@ -189,6 +193,17 @@ class AnswerSuffixDecodingPress(BasePress):
         else:
             cache_layer.keys = new_keys
             cache_layer.values = new_vals
+
+        if cache_len_after != cache_len_before or suffix_len_after != suffix_len_before:
+            logger.info(
+                "Applied local suffix compression: layer=%s cache=%s->%s answer_suffix=%s->%s target=%s",
+                layer_idx,
+                cache_len_before,
+                cache_len_after,
+                suffix_len_before,
+                suffix_len_after,
+                self.target_size,
+            )
 
         self._hidden_buffer[layer_idx] = []
         if self.hidden_states_buffer_size > 0:

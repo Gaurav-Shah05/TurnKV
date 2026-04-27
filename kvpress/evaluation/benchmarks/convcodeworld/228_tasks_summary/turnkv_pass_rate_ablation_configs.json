@@ -1,0 +1,194 @@
+{
+  "metadata": {
+    "purpose": "TurnKV-specific hyperparameter ablation for final pass rate optimization on ConvCodeWorld.",
+    "baseline_source": "modal_run_smoke_baseline_snapkv.sh"
+  },
+  "fixed_non_turnkv_args": {
+    "--global-budget": 2048,
+    "--local-budget": 1536,
+    "--max-new-tokens": 2048,
+    "--compression-ratio": 0.5
+  },
+  "configs": [
+    {
+      "CONFIG_LABEL": "turnkv_ref_allon_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 1.0,
+        "--alpha-anchor": 1.0,
+        "--alpha-loyalty": 1.0,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.3,
+        "--min-floor-tokens": 5,
+        "--anchor-beta": 0.25,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_floorheavy_recent_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 1.5,
+        "--alpha-anchor": 0.8,
+        "--alpha-loyalty": 0.8,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.45,
+        "--min-floor-tokens": 8,
+        "--anchor-beta": 0.2,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_anchorheavy_intent_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.8,
+        "--alpha-anchor": 1.5,
+        "--alpha-loyalty": 0.8,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.25,
+        "--min-floor-tokens": 5,
+        "--anchor-beta": 0.35,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_loyaltyheavy_fast_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.7,
+        "--alpha-anchor": 0.8,
+        "--alpha-loyalty": 1.5,
+        "--floor-gamma": 0.1,
+        "--alpha-floor-len": 0.2,
+        "--min-floor-tokens": 4,
+        "--anchor-beta": 0.2,
+        "--loyalty-top-p": 0.35,
+        "--loyalty-update-every": 3
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_balanced_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.5,
+        "--alpha-anchor": 0.5,
+        "--alpha-loyalty": 0.5,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.2,
+        "--min-floor-tokens": 3,
+        "--anchor-beta": 0.15,
+        "--loyalty-top-p": 0.2,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_aggressive_memory_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 1.2,
+        "--alpha-anchor": 1.2,
+        "--alpha-loyalty": 1.2,
+        "--floor-gamma": 0.05,
+        "--alpha-floor-len": 0.35,
+        "--min-floor-tokens": 10,
+        "--anchor-beta": 0.3,
+        "--loyalty-top-p": 0.15,
+        "--loyalty-update-every": 1
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_loweralphas_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.35,
+        "--alpha-anchor": 0.35,
+        "--alpha-loyalty": 0.35,
+        "--floor-gamma": 0.25,
+        "--alpha-floor-len": 0.15,
+        "--min-floor-tokens": 2,
+        "--anchor-beta": 0.12,
+        "--loyalty-top-p": 0.18,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_anchorlift_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.45,
+        "--alpha-anchor": 0.75,
+        "--alpha-loyalty": 0.45,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.18,
+        "--min-floor-tokens": 3,
+        "--anchor-beta": 0.22,
+        "--loyalty-top-p": 0.2,
+        "--loyalty-update-every": 5
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_loyaltylift_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.4,
+        "--alpha-anchor": 0.45,
+        "--alpha-loyalty": 0.75,
+        "--floor-gamma": 0.2,
+        "--alpha-floor-len": 0.18,
+        "--min-floor-tokens": 3,
+        "--anchor-beta": 0.15,
+        "--loyalty-top-p": 0.25,
+        "--loyalty-update-every": 4
+      }
+    },
+    {
+      "CONFIG_LABEL": "turnkv_conservative_floorlift_g2048_l1536_mt2048_cr05",
+      "args": {
+        "--global-budget": 2048,
+        "--local-budget": 1536,
+        "--max-new-tokens": 2048,
+        "--compression-ratio": 0.5,
+        "--alpha-floor": 0.75,
+        "--alpha-anchor": 0.45,
+        "--alpha-loyalty": 0.45,
+        "--floor-gamma": 0.25,
+        "--alpha-floor-len": 0.25,
+        "--min-floor-tokens": 4,
+        "--anchor-beta": 0.14,
+        "--loyalty-top-p": 0.2,
+        "--loyalty-update-every": 5
+      }
+    }
+  ]
+}

@@ -467,6 +467,14 @@ class TurnAwareGlobalPress(BasePress):
                 keys, values = extract_keys_and_values(cache, layer_idx)
                 new_keys, new_values = self.compress(module, hidden_states, keys, values, None, kwargs)
                 self._write_layer(cache, layer_idx, new_keys, new_values)
+            cache_len_after = cache.get_seq_length()
+            logger.info(
+                "Applied global compression: cache=%s->%s target=%s budget=%s",
+                current_len,
+                cache_len_after,
+                effective_target,
+                orig_budget,
+            )
         finally:
             self.base_press.compression_ratio = orig_ratio
             self.global_budget = orig_budget
