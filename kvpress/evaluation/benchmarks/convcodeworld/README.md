@@ -116,7 +116,8 @@ python benchmarks/convcodeworld/live_loop.py \
     --press_name=snapkv \
     --compression_ratio=0.5 \
     --model=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --feedback_model=google/gemma-4-E2B-it \
+    --feedback_model=google/gemma-4-26B-A4B-it \
+    --feedback_attn_implementation=vllm_triton \
     --feedback_config=CF_EF_UNIT_SNF \
     --num_eval_examples=10
 ```
@@ -129,9 +130,9 @@ modal run evaluation/benchmarks/convcodeworld/modal_app.py::main \
     --benchmark-mode live \
     --press-names snapkv,streaming_llm,expected_attention \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-    --feedback-model google/gemma-4-E2B-it \
+    --feedback-model google/gemma-4-26B-A4B-it \
     --attn-implementation flash_attention_3 \
-    --feedback-attn-implementation flash_attention_3 \
+    --feedback-attn-implementation vllm_triton \
     --compression-ratio 0.5 \
     --snapkv-window-size 64 \
     --snapkv-kernel-size 5 \
@@ -151,7 +152,7 @@ from the reference trajectory rather than a simulator model.
 Static replay and live loop answer different questions: static replay isolates
 the compression effect under a fixed conversation, while live loop measures the
 fully interactive cascade where later turns depend on each generated solution.
-Live-loop Modal runs default to exact H100 GPUs with `flash_attention_3` for DeepSeek-R1-Distill-Llama-8B code generation, `sdpa` for Gemma 4 E2B verbal feedback, `--cot=True`, early-stop once generated code passes the available tests, and expose the base-press knobs through the top-level Modal command.
+Live-loop Modal runs default to one exact H200 GPU with `flash_attention_3` for code generation and a local vLLM Triton server for Gemma 4 26B-A4B verbal feedback on the same GPU, `--cot=True`, early-stop once generated code passes the available tests, and expose the base-press knobs through the top-level Modal command. Set `KV_PRESS_CONVCODEWORLD_MODAL_GPU` before `modal run` to override the worker GPU type.
 The Modal image builds and caches a reduced BF16-only FlashAttention-3 wheel before copying repo source so ordinary code changes do not rebuild the H100 kernels.
 It also pins Transformers to an upstream GitHub commit with Gemma4 support for the feedback model.
 Turn-aware runs can use registry names such as `turnkv_snapkv` or pass

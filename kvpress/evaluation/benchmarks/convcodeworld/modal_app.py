@@ -22,11 +22,16 @@ from typing import Optional
 import modal
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-DEFAULT_FEEDBACK_MODEL = "google/gemma-3-4b-it"
+DEFAULT_FEEDBACK_MODEL = "google/gemma-4-26B-A4B-it"
 DEFAULT_ATTN_IMPLEMENTATION = "flash_attention_3"
-DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION = "flash_attention_3"
+DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION = "vllm_triton"
 DEFAULT_BENCHMARK_MODE = "live"
-CUDA_BASE_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
+MODAL_GPU_SPEC = os.environ.get("KV_PRESS_CONVCODEWORLD_MODAL_GPU", "H200")
+DEFAULT_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES = os.environ.get(
+    "KV_PRESS_CONVCODEWORLD_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES",
+    "1" if ":2" in MODAL_GPU_SPEC else "",
+) or None
+CUDA_BASE_IMAGE = "nvidia/cuda:12.9.1-devel-ubuntu24.04"
 MODAL_TORCH_VERSION = "2.8.0"
 FLASH_ATTN3_REF = "v2.8.3"
 TRANSFORMERS_GIT_REF = "bc4b330451d0e3e33f4ac63593ed9f245227712e"
@@ -43,7 +48,6 @@ FLASH_ATTN3_BUILD_ENV = (
     "MAX_JOBS=8 NVCC_THREADS=2"
 )
 MODAL_EVAL_REQUIREMENTS = (
-    f"torch=={MODAL_TORCH_VERSION}",
     "numpy>=2.0.0,<3",
     "datasets>=2.21.0",
     "pandas>=2.2.2,<3",
@@ -70,6 +74,12 @@ MODAL_EVAL_REQUIREMENTS = (
     "sentencepiece>=0.2.0,<0.3",
     "protobuf>=5.27.2,<6",
     "einops>=0.8.0,<1",
+)
+VLLM_INSTALL_COMMAND = (
+    "uv pip install --python /root/kvpress/.venv/bin/python --upgrade --pre vllm "
+    "--extra-index-url https://wheels.vllm.ai/nightly/cu129 "
+    "--extra-index-url https://download.pytorch.org/whl/cu129 "
+    "--index-strategy unsafe-best-match"
 )
 
 
@@ -108,6 +118,7 @@ base_image = (
         f"uv pip install --python /root/kvpress/.venv/bin/python torch=={MODAL_TORCH_VERSION} "
         "wheel setuptools setuptools_scm packaging ninja einops"
     )
+    .run_commands(VLLM_INSTALL_COMMAND)
     .run_commands(
         "git clone --depth=1 --branch "
         f"{FLASH_ATTN3_REF} https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && "
@@ -259,8 +270,18 @@ def _needs_hf_token(model_name: str | None) -> bool:
     return normalized.startswith(("meta-llama/", "google/gemma", "google/txgemma"))
 
 
+def _is_vllm_triton_attention(implementation: Optional[str]) -> bool:
+    normalized = str(implementation or "").strip().lower().replace("-", "_")
+    return normalized in {
+        "vllm_triton",
+        "vllm_triton_attn",
+        "vllm_triton_attention",
+        "triton_attn",
+    }
+
+
 @app.function(
-    gpu="H100!",
+    gpu=MODAL_GPU_SPEC,
     timeout=86400,
     volumes={
         "/root/.cache/huggingface": hf_cache,
@@ -276,6 +297,11 @@ def run_convcodeworld_live(
     feedback_attn_implementation: Optional[str] = (
         DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION
     ),
+    feedback_vllm_port: int = 8001,
+    feedback_vllm_cuda_visible_devices: Optional[str] = DEFAULT_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES,
+    feedback_vllm_max_model_len: int = 32768,
+    feedback_vllm_gpu_memory_utilization: float = 0.75,
+    feedback_vllm_start_timeout_s: int = 1800,
     full_kv_cache: bool = False,
     require_flashdecode: bool = False,
     error_on_kv_cache_vram_exhaustion: bool = False,
@@ -322,6 +348,7 @@ def run_convcodeworld_live(
     env = os.environ.copy()
     env["HF_HOME"] = "/root/.cache/huggingface"
     env["TRANSFORMERS_CACHE"] = env["HF_HOME"]
+    env.setdefault("HF_HUB_DISABLE_XET", "1")
     for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
         if os.environ.get(key):
             env[key] = os.environ[key]
@@ -348,6 +375,16 @@ def run_convcodeworld_live(
         env["KV_PRESS_CONVCODEWORLD_FEEDBACK_ATTN_IMPLEMENTATION"] = (
             feedback_attn_implementation
         )
+    if _is_vllm_triton_attention(feedback_attn_implementation):
+        env["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN"
+        env.setdefault("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "0")
+        env.setdefault("VLLM_USE_DEEP_GEMM", "0")
+        env.setdefault("VLLM_MOE_USE_DEEP_GEMM", "0")
+        env.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")
+        if feedback_vllm_cuda_visible_devices:
+            env["KV_PRESS_CONVCODEWORLD_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES"] = (
+                feedback_vllm_cuda_visible_devices
+            )
 
     base_output_dir = "/root/kvpress/evaluation/results_convcodeworld_live_modal"
     if output_subdir:
@@ -392,6 +429,19 @@ def run_convcodeworld_live(
         "feedback_attn_implementation",
         feedback_attn_implementation,
     )
+    _append_optional_flag(cmd, "feedback_vllm_port", feedback_vllm_port)
+    _append_optional_flag(
+        cmd,
+        "feedback_vllm_cuda_visible_devices",
+        feedback_vllm_cuda_visible_devices,
+    )
+    _append_optional_flag(cmd, "feedback_vllm_max_model_len", feedback_vllm_max_model_len)
+    _append_optional_flag(
+        cmd,
+        "feedback_vllm_gpu_memory_utilization",
+        feedback_vllm_gpu_memory_utilization,
+    )
+    _append_optional_flag(cmd, "feedback_vllm_start_timeout_s", feedback_vllm_start_timeout_s)
     if full_kv_cache:
         cmd.append("--full_kv_cache=True")
     if require_flashdecode:
@@ -418,9 +468,11 @@ def run_convcodeworld_live(
     _append_optional_flag(cmd, "alpha_floor_len", alpha_floor_len)
     _append_optional_flag(cmd, "min_floor_tokens", min_floor_tokens)
     _append_optional_flag(cmd, "task_ids", task_ids)
-    subprocess.check_call(cmd, env=env, cwd="/root/kvpress/evaluation")
-    hf_cache.commit()
-    results_volume.commit()
+    try:
+        subprocess.check_call(cmd, env=env, cwd="/root/kvpress/evaluation")
+    finally:
+        hf_cache.commit()
+        results_volume.commit()
     return f"ok: {benchmark_mode}:{press_name}"
 
 
@@ -433,6 +485,11 @@ def main(
     feedback_attn_implementation: Optional[str] = (
         DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION
     ),
+    feedback_vllm_port: int = 8001,
+    feedback_vllm_cuda_visible_devices: Optional[str] = DEFAULT_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES,
+    feedback_vllm_max_model_len: int = 32768,
+    feedback_vllm_gpu_memory_utilization: float = 0.75,
+    feedback_vllm_start_timeout_s: int = 1800,
     full_kv_cache: bool = False,
     require_flashdecode: bool = False,
     error_on_kv_cache_vram_exhaustion: bool = False,
@@ -485,6 +542,11 @@ def main(
             feedback_model=feedback_model,
             attn_implementation=attn_implementation,
             feedback_attn_implementation=feedback_attn_implementation,
+            feedback_vllm_port=feedback_vllm_port,
+            feedback_vllm_cuda_visible_devices=feedback_vllm_cuda_visible_devices,
+            feedback_vllm_max_model_len=feedback_vllm_max_model_len,
+            feedback_vllm_gpu_memory_utilization=feedback_vllm_gpu_memory_utilization,
+            feedback_vllm_start_timeout_s=feedback_vllm_start_timeout_s,
             full_kv_cache=full_kv_cache,
             require_flashdecode=require_flashdecode,
             error_on_kv_cache_vram_exhaustion=error_on_kv_cache_vram_exhaustion,

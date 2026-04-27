@@ -109,9 +109,9 @@ Per-problem inspection of SCBench revealed its "multi-turn" mode is independent 
 - **Not yet scaffolded**: LongMemEval, TopiOCQA — next.
 - **Week-1 press primitives landed**: `TurnBoundary`, `TurnAwareMixin`, `TurnFloorPress` (policy A), `RoleBoundaryAnchorPress` (policy B), `TurnAwareGlobalPress` (composer). Tests green. Registry updated with `turnkv_*` and `baseline_*` entries.
 - **ConvCodeWorld live-loop runner expanded** (`live_loop.py`): static-replay and live-loop modes, VRAM-safety guards, FA3 flashdecode tracking, tokenizer-artefact normalisation, compilable-prefix fallback for truncated generation.
-- **`attention_patch.py`**: flashdecode tracking (`reset_flashdecode_tracking`, `flashdecode_used_layers`) to verify FA3 decode path is active on H100.
+- **`attention_patch.py`**: flashdecode tracking (`reset_flashdecode_tracking`, `flashdecode_used_layers`) to verify FA3 decode path is active on H100/H200.
 - **`executor.py`**: `normalize_tokenizer_artifacts`, `normalize_candidate_code`, `_longest_compilable_prefix` helpers.
-- **`modal_app.py`** fully rewritten with extracted constants, reproducible FA3 build layer, `gemma-3-4b-it` feedback model.
+- **`modal_app.py`** fully rewritten with extracted constants, reproducible FA3 build layer, `gemma-4-26B-A4B-it` feedback model via vLLM Triton attention.
 - **`modal_run.sh`** rewritten: targets `run_convcodeworld_live`, runs `no_press` full-cache baseline with `require_flashdecode` and VRAM guard.
 - **`MODAL_HYPERPARAMS.md`**: new reference doc for all Modal CLI flags.
 - **Shared blocker**: the multi-turn harness (`kvpress/evaluation/multi_turn_evaluate.py`) — still needed to wire ConvCodeWorld and LongMemEval end-to-end.

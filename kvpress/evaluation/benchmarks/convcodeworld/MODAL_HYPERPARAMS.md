@@ -25,9 +25,14 @@ worker run starts.
 | Flag | Type | Default | Meaning |
 |---|---:|---|---|
 | `--model` | `str` | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | Code-generation model. Also stored in `KV_PRESS_CONVCODEWORLD_MODEL` inside Modal. |
-| `--feedback-model` | `str` or `None` | `google/gemma-3-4b-it` | Model used for simulated verbal feedback in `live` mode. In `static` mode, reference feedback is teacher-forced and this is ignored. |
+| `--feedback-model` | `str` or `None` | `google/gemma-4-26B-A4B-it` | Model used for simulated verbal feedback in `live` mode. In `static` mode, reference feedback is teacher-forced and this is ignored. |
 | `--attn-implementation` | `str` or `None` | `flash_attention_3` | Attention backend for the code model. Use `eager` only for debugging fallback. |
-| `--feedback-attn-implementation` | `str` or `None` | `flash_attention_3` | Attention backend for the feedback model. |
+| `--feedback-attn-implementation` | `str` or `None` | `vllm_triton` | Attention backend for the feedback model. `vllm_triton` launches a local vLLM server with `VLLM_ATTENTION_BACKEND=TRITON_ATTN`, so feedback prompt prefill and decode both run through vLLM Triton attention. |
+| `--feedback-vllm-port` | `int` | `8001` | Local vLLM OpenAI-compatible server port for `vllm_triton` feedback. |
+| `--feedback-vllm-cuda-visible-devices` | `str` or `None` | `None` | Optional CUDA device mask for the feedback vLLM subprocess. The default single-H200 worker leaves both models visible on GPU 0. |
+| `--feedback-vllm-max-model-len` | `int` | `32768` | vLLM `--max-model-len` for the feedback server. |
+| `--feedback-vllm-gpu-memory-utilization` | `float` | `0.75` | vLLM `--gpu-memory-utilization` for the feedback server. |
+| `--feedback-vllm-start-timeout-s` | `int` | `1800` | Seconds to wait for the feedback vLLM server health check. |
 | `--cot` / `--no-cot` | `bool` | `True` | Adds a brief "think through the feedback" instruction to the initial coding context. |
 | `--network-isolation` | `str` | `auto` | Passed to the code executor. `auto` tries network namespace isolation and falls back if unavailable. |
 | `--early-stop-on-pass` / `--no-early-stop-on-pass` | `bool` | `True` | Stop a task's live loop once generated code passes; remaining turns are synthetic metric-excluded rows. |
@@ -100,12 +105,12 @@ These are constants in `modal_app.py`, not CLI flags.
 | Name | Value | Meaning |
 |---|---|---|
 | Modal app | `kvpress-convcodeworld-live` | App name registered with Modal. |
-| GPU | `H100!` | Exact H100 request for each remote run. |
+| GPU | `H200` | Modal GPU request, configured by `KV_PRESS_CONVCODEWORLD_MODAL_GPU` before direct `modal run`, or by `--gpu-spec` in the smoke scripts. The default single-H200 request keeps the code model and feedback vLLM server on one GPU. |
 | Timeout | `86400` seconds | One-day remote function timeout. |
-| CUDA base image | `nvidia/cuda:12.8.1-devel-ubuntu24.04` | Base image used to build the worker. |
+| CUDA base image | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Base image used to build the worker. |
 | Python | `3.11` | Python version added to the CUDA image. |
-| Torch | `2.8.0` | Torch pin installed into `/root/kvpress/.venv`. |
-| FlashAttention-3 ref | `v2.8.3` | Git tag used to build the reduced H100 FA3 wheel. |
+| Torch seed version | `2.8.0` | Initial Torch version installed into `/root/kvpress/.venv`; the vLLM pre-release install may upgrade it to satisfy the CUDA 12.9 wheel. |
+| FlashAttention-3 ref | `v2.8.3` | Git tag used to build the reduced Hopper FA3 wheel. |
 | Transformers ref | `bc4b330451d0e3e33f4ac63593ed9f245227712e` | Upstream commit installed for Gemma4 support. |
 | HF cache volume | `kvpress-hf-cache` | Mounted at `/root/.cache/huggingface`. |
 | Results volume | `kvpress-convcodeworld-results` | Mounted at `/root/kvpress/evaluation/results_convcodeworld_live_modal`. |
@@ -115,7 +120,9 @@ These are constants in `modal_app.py`, not CLI flags.
 These are local shell dispatchers, not direct `modal_app.py::main` flags. They
 launch `NUM_SHARDS` detached calls to
 `evaluation/benchmarks/convcodeworld/modal_app.py::run_convcodeworld_live`, one
-per shard JSON.
+per shard JSON. All three scripts default to one H200 per shard, Gemma 4
+26B-A4B feedback, and `vllm_triton` feedback attention; override these with
+`--gpu-spec`, `FEEDBACK_MODEL`, and `FEEDBACK_ATTN_IMPLEMENTATION` as needed.
 
 | Script | Press | Default mode | Code generation cap | Notes |
 |---|---|---|---|---|
@@ -129,6 +136,27 @@ All three smoke scripts accept a script-level split selector:
 ./evaluation/benchmarks/convcodeworld/modal_run_smoke_turnkv_snapkv.sh --split 228
 ./evaluation/benchmarks/convcodeworld/modal_run_smoke_turnkv_snapkv.sh --split 100
 ```
+
+All three smoke scripts default to `--gpu-spec H200` and background Modal CLI
+dispatch, so `--split 100` is enough to submit all 10 H200 shard jobs:
+
+```bash
+./evaluation/benchmarks/convcodeworld/modal_run_smoke_no_press.sh --split 100
+
+./evaluation/benchmarks/convcodeworld/modal_run_smoke_baseline_snapkv.sh --split 100
+
+./evaluation/benchmarks/convcodeworld/modal_run_smoke_turnkv_snapkv.sh --split 100
+```
+
+| Flag | Meaning |
+|---|---|
+| `--gpu-spec <spec>` | Modal GPU request for each shard, defaulting to `MODAL_GPU_SPEC` or `H200`. The script forwards this as `KV_PRESS_CONVCODEWORLD_MODAL_GPU` to each `modal run`. |
+| `--background-modal-cli` | Submit all shard `modal run -d` commands without waiting for each local Modal CLI process. This is the default. |
+| `--foreground-modal-cli` / `--no-background-modal-cli` | Wait for each local Modal CLI process before dispatching the next shard. Use this when image builds are not cached and you want to watch the first build finish before submitting later shards. |
+
+The scripts accept Hugging Face credentials from `HF_TOKEN`,
+`HUGGING_FACE_HUB_TOKEN`, `MODAL_HF_SECRET_NAME`, or an existing local
+`huggingface-cli login` token.
 
 | `--split` value | Shard stem | Total tasks | With `NUM_SHARDS=10` |
 |---|---|---:|---:|
@@ -163,9 +191,11 @@ IDs and then preserving the source split order before interleaved sharding. See
 ```bash
 --benchmark-mode live
 --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
---feedback-model google/gemma-3-4b-it
+--feedback-model google/gemma-4-26B-A4B-it
 --attn-implementation flash_attention_3
---feedback-attn-implementation flash_attention_3
+--feedback-attn-implementation vllm_triton
+--feedback-vllm-max-model-len 32768
+--feedback-vllm-gpu-memory-utilization 0.75
 --feedback-config CF_EF_UNIT_SNF
 --press-name no_press
 --compression-ratio 0.0

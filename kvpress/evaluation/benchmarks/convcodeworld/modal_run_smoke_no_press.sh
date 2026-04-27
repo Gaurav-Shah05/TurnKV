@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke run #0 (full KV): no press / no KV-cache compression on the 228-task
 # 20% tune split, fanned out to 10 detached Modal containers (one per shard,
-# ~23 tasks each on its own H100). Same model + prompt config as the SnapKV
+# ~23 tasks each on its own H200). Same model + prompt config as the SnapKV
 # smoke runs so this is the uncompressed control.
 #
 # Profile: ypatlola (override via MODAL_PROFILE=...).
@@ -19,6 +19,13 @@ BENCHMARK_MODE="${BENCHMARK_MODE:-live}"
 # budgets do not trigger eviction.
 GLOBAL_BUDGET="${GLOBAL_BUDGET:-4096}"
 LOCAL_BUDGET="${LOCAL_BUDGET:-2048}"
+MODAL_GPU_SPEC="${MODAL_GPU_SPEC:-H200}"
+FEEDBACK_MODEL="${FEEDBACK_MODEL:-google/gemma-4-26B-A4B-it}"
+FEEDBACK_ATTN_IMPLEMENTATION="${FEEDBACK_ATTN_IMPLEMENTATION:-vllm_triton}"
+FEEDBACK_VLLM_MAX_MODEL_LEN="${FEEDBACK_VLLM_MAX_MODEL_LEN:-32768}"
+FEEDBACK_VLLM_GPU_MEMORY_UTILIZATION="${FEEDBACK_VLLM_GPU_MEMORY_UTILIZATION:-0.75}"
+FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES="${FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES:-}"
+BACKGROUND_MODAL_CLI="${BACKGROUND_MODAL_CLI:-true}"
 # Optional label baked into output_subdir + log filename so multiple runs
 # with different configs don't collide on the Modal volume.
 CONFIG_LABEL="${CONFIG_LABEL:-}"
@@ -26,9 +33,11 @@ DEFAULT_SHARD_STEM="tune_20pct_seed42"
 SHARD_STEM="${SHARD_STEM:-$DEFAULT_SHARD_STEM}"
 
 usage() {
-  echo "Usage: $(basename "$0") [--split 228|100|<split-stem>]" >&2
+  echo "Usage: $(basename "$0") [--split 228|100|<split-stem>] [--gpu-spec H200] [--background-modal-cli|--foreground-modal-cli]" >&2
   echo "  228 -> tune_20pct_seed42 (228 tasks, ~23 per shard)" >&2
   echo "  100     -> tune_100tasks_seed42 (100 tasks, 10 per shard)" >&2
+  echo "  --gpu-spec sets the Modal GPU request for each shard (default: ${MODAL_GPU_SPEC})" >&2
+  echo "  --background-modal-cli submits all shards without waiting for each Modal CLI process (default: ${BACKGROUND_MODAL_CLI})" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +52,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --split=*)
       SHARD_STEM="${1#--split=}"
+      shift
+      ;;
+    --gpu-spec)
+      if [[ $# -lt 2 ]]; then
+        usage
+        exit 1
+      fi
+      MODAL_GPU_SPEC="$2"
+      shift 2
+      ;;
+    --gpu-spec=*)
+      MODAL_GPU_SPEC="${1#--gpu-spec=}"
+      shift
+      ;;
+    --background-modal-cli)
+      BACKGROUND_MODAL_CLI=true
+      shift
+      ;;
+    --background-modal-cli=*)
+      BACKGROUND_MODAL_CLI="${1#--background-modal-cli=}"
+      shift
+      ;;
+    --foreground-modal-cli|--no-background-modal-cli)
+      BACKGROUND_MODAL_CLI=false
       shift
       ;;
     -h|--help)
@@ -65,6 +98,20 @@ case "$SHARD_STEM" in
     SHARD_STEM="tune_100tasks_seed42"
     ;;
 esac
+
+case "$BACKGROUND_MODAL_CLI" in
+  true|false)
+    ;;
+  *)
+    echo "Invalid --background-modal-cli value: $BACKGROUND_MODAL_CLI (expected true or false)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -z "$MODAL_GPU_SPEC" ]]; then
+  echo "--gpu-spec must not be empty" >&2
+  exit 1
+fi
 SHARD_DIR="$script_dir/splits/shards"
 SPLIT_FILE="$script_dir/splits/${SHARD_STEM}.json"
 
@@ -83,10 +130,13 @@ if [[ ! -f "$SPLIT_FILE" ]]; then
   exit 1
 fi
 
-: "${HF_TOKEN:?HF_TOKEN must be set before running this smoke test}"
 MODAL_BIN="${MODAL_BIN:-$(command -v modal || true)}"
 if [[ -z "$MODAL_BIN" ]]; then
   echo "Modal CLI not found. Install Modal or set MODAL_BIN=/path/to/modal before running this smoke test." >&2
+  exit 1
+fi
+if [[ -z "${HF_TOKEN:-}" && -z "${HUGGING_FACE_HUB_TOKEN:-}" && -z "${MODAL_HF_SECRET_NAME:-}" && ! -f "$HOME/.cache/huggingface/token" ]]; then
+  echo "No Hugging Face credential found. Set HF_TOKEN, HUGGING_FACE_HUB_TOKEN, MODAL_HF_SECRET_NAME, or run huggingface-cli login." >&2
   exit 1
 fi
 
@@ -113,7 +163,7 @@ fi
 LOG_DIR="$LOG_ROOT/${RUN_TAG}_${RUN_TS}"
 mkdir -p "$LOG_DIR"
 INDEX_FILE="$LOG_DIR/index.txt"
-echo "# no_press smoke - mode=$BENCHMARK_MODE split=$SHARD_STEM label='$CONFIG_LABEL' profile=$MODAL_PROFILE budget=$GLOBAL_BUDGET/$LOCAL_BUDGET - $RUN_TS" > "$INDEX_FILE"
+echo "# no_press smoke - mode=$BENCHMARK_MODE split=$SHARD_STEM label='$CONFIG_LABEL' profile=$MODAL_PROFILE gpu=$MODAL_GPU_SPEC feedback=$FEEDBACK_MODEL/$FEEDBACK_ATTN_IMPLEMENTATION budget=$GLOBAL_BUDGET/$LOCAL_BUDGET - $RUN_TS" > "$INDEX_FILE"
 
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   shard_json="$SHARD_DIR/${SHARD_STEM}_shard_${shard}_of_${NUM_SHARDS}.json"
@@ -130,6 +180,11 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     --benchmark-mode "$BENCHMARK_MODE"
     --model meta-llama/Meta-Llama-3.1-8B-Instruct
     --attn-implementation flash_attention_3
+    --feedback-model "$FEEDBACK_MODEL"
+    --feedback-attn-implementation "$FEEDBACK_ATTN_IMPLEMENTATION"
+    --feedback-vllm-cuda-visible-devices "$FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES"
+    --feedback-vllm-max-model-len "$FEEDBACK_VLLM_MAX_MODEL_LEN"
+    --feedback-vllm-gpu-memory-utilization "$FEEDBACK_VLLM_GPU_MEMORY_UTILIZATION"
     --feedback-config CF_EF_UNIT_SNF
     --press-name no_press
     --compression-ratio 0.0
@@ -149,27 +204,29 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
   fi
 
   echo "[shard $shard/$((NUM_SHARDS - 1))] dispatching detached run -> $log_file"
-  # Background the modal CLI: with -d, the function call registers on Modal
-  # within a few seconds of image upload, after which the CLI just streams
-  # logs uselessly until task completion. Backgrounding lets the dispatcher
-  # loop continue immediately; the function call survives even if we kill
-  # the CLI later. nohup + redirected stdin keeps it alive past the parent
-  # shell's exit.
-  (
-    nohup env \
-      MODAL_PROFILE="$MODAL_PROFILE" \
-      HF_TOKEN="$HF_TOKEN" \
-      PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}" \
-      PYTHONUTF8="${PYTHONUTF8:-1}" \
-      MSYS_NO_PATHCONV="${MSYS_NO_PATHCONV:-1}" \
-      MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL:-*}" \
-      "$MODAL_BIN" run -d "${shard_args[@]}" \
-      > "$log_file" 2>&1 < /dev/null &
-    disown $! 2>/dev/null || true
+  modal_env=(
+    env
+    MODAL_PROFILE="$MODAL_PROFILE"
+    KV_PRESS_CONVCODEWORLD_MODAL_GPU="$MODAL_GPU_SPEC"
+    HF_TOKEN="${HF_TOKEN:-}"
+    HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-}"
+    MODAL_HF_SECRET_NAME="${MODAL_HF_SECRET_NAME:-}"
+    PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+    PYTHONUTF8="${PYTHONUTF8:-1}"
+    MSYS_NO_PATHCONV="${MSYS_NO_PATHCONV:-1}"
+    MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL:-*}"
   )
-  # Tiny pause so successive dispatches don't race the gRPC channel setup;
-  # Modal de-dupes image builds across concurrent calls so no extra cost.
-  sleep 3
+  if [[ "$BACKGROUND_MODAL_CLI" == "true" ]]; then
+    (
+      nohup "${modal_env[@]}" "$MODAL_BIN" run -d "${shard_args[@]}" \
+        > "$log_file" 2>&1 < /dev/null &
+      disown $! 2>/dev/null || true
+    )
+    sleep 3
+  else
+    "${modal_env[@]}" "$MODAL_BIN" run -d "${shard_args[@]}" \
+      > "$log_file" 2>&1
+  fi
 
   echo "shard=$shard json=$shard_json log=$log_file output_subdir=$output_subdir" >> "$INDEX_FILE"
 done

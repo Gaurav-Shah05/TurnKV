@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import shlex
 import subprocess
 import sys
 import time
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import pandas as pd
+import requests
 import torch
 import yaml
 from datasets import load_dataset
@@ -62,7 +64,9 @@ from benchmarks.convcodeworld.executor import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-DEFAULT_FEEDBACK_MODEL = "google/gemma-3-4b-it"
+DEFAULT_FEEDBACK_MODEL = "google/gemma-4-26B-A4B-it"
+VLLM_TRITON_ATTN_IMPLEMENTATION = "vllm_triton"
+DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION = VLLM_TRITON_ATTN_IMPLEMENTATION
 # Stop sequences are last-resort guards. The primary stop signal is the
 # tokenizer's EOS/EOT token, which chat-template prompting causes the model
 # to emit naturally at the end of an assistant turn. These literal patterns
@@ -92,7 +96,12 @@ class ConvCodeWorldLiveConfig:
     model: str = DEFAULT_MODEL
     feedback_model: Optional[str] = DEFAULT_FEEDBACK_MODEL
     attn_implementation: Optional[str] = "flash_attention_3"
-    feedback_attn_implementation: Optional[str] = "flash_attention_3"
+    feedback_attn_implementation: Optional[str] = DEFAULT_FEEDBACK_ATTN_IMPLEMENTATION
+    feedback_vllm_port: int = 8001
+    feedback_vllm_cuda_visible_devices: Optional[str] = None
+    feedback_vllm_max_model_len: int = 32768
+    feedback_vllm_gpu_memory_utilization: float = 0.75
+    feedback_vllm_start_timeout_s: int = 1800
     full_kv_cache: bool = False
     require_flashdecode: bool = False
     error_on_kv_cache_vram_exhaustion: bool = False
@@ -221,6 +230,16 @@ def _target_from_ratio(global_budget: int, compression_ratio: float) -> int:
 
 def _is_flash_attention_3(implementation: Optional[str]) -> bool:
     return str(implementation or "").endswith("flash_attention_3")
+
+
+def _is_vllm_triton_attention(implementation: Optional[str]) -> bool:
+    normalized = str(implementation or "").strip().lower().replace("-", "_")
+    return normalized in {
+        VLLM_TRITON_ATTN_IMPLEMENTATION,
+        "vllm_triton_attn",
+        "vllm_triton_attention",
+        "triton_attn",
+    }
 
 
 def _model_uses_flash_attention_3(model) -> bool:
@@ -706,6 +725,152 @@ def _results_dir(cfg: ConvCodeWorldLiveConfig) -> Path:
     return out
 
 
+class VllmTritonFeedbackClient:
+    """Small OpenAI-compatible client for a local vLLM feedback server."""
+
+    def __init__(self, model_name: str, cfg: ConvCodeWorldLiveConfig, log_dir: Path):
+        self.model_name = model_name
+        self.port = int(cfg.feedback_vllm_port)
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.log_path = log_dir / "vllm_feedback_server.log"
+        self._log_handle = None
+        self.process: subprocess.Popen | None = None
+        self._start(cfg)
+
+    def _command(self, cfg: ConvCodeWorldLiveConfig) -> list[str]:
+        vllm_cli = Path(sys.executable).with_name("vllm")
+        common_args = [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--trust-remote-code",
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            str(cfg.feedback_vllm_max_model_len),
+            "--gpu-memory-utilization",
+            str(cfg.feedback_vllm_gpu_memory_utilization),
+            "--served-model-name",
+            self.model_name,
+        ]
+        if vllm_cli.is_file():
+            return [str(vllm_cli), "serve", self.model_name, *common_args]
+        return [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            self.model_name,
+            *common_args,
+        ]
+
+    def _start(self, cfg: ConvCodeWorldLiveConfig) -> None:
+        env = os.environ.copy()
+        env["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN"
+        # Keep vLLM on its Triton unified-attention path, which covers prompt
+        # processing and one-token decode in one backend.
+        env.setdefault("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "0")
+        # Gemma4 MoE can trigger DeepGEMM warmup in vLLM nightlies. The Modal
+        # image does not install deep_gemm, so keep MoE on the Triton backend.
+        env.setdefault("VLLM_USE_DEEP_GEMM", "0")
+        env.setdefault("VLLM_MOE_USE_DEEP_GEMM", "0")
+        env.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")
+        if cfg.feedback_vllm_cuda_visible_devices:
+            env["CUDA_VISIBLE_DEVICES"] = cfg.feedback_vllm_cuda_visible_devices
+
+        cmd = self._command(cfg)
+        self._log_handle = self.log_path.open("a", encoding="utf-8")
+        logger.info(
+            "Starting vLLM Triton feedback server: %s (log: %s)",
+            shlex.join(cmd),
+            self.log_path,
+        )
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self._wait_until_ready(cfg.feedback_vllm_start_timeout_s)
+        except Exception:
+            self.close()
+            raise
+
+    def _wait_until_ready(self, timeout_s: int) -> None:
+        deadline = time.monotonic() + max(1, int(timeout_s))
+        last_error = ""
+        while time.monotonic() < deadline:
+            if self.process is not None and self.process.poll() is not None:
+                log_tail = self._log_tail()
+                raise RuntimeError(
+                    "vLLM feedback server exited before becoming ready; "
+                    f"see {self.log_path}.\n{log_tail}"
+                )
+            try:
+                response = requests.get(f"{self.base_url}/health", timeout=5)
+                if response.status_code < 500:
+                    logger.info("vLLM Triton feedback server is ready on %s", self.base_url)
+                    return
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+            except requests.RequestException as exc:
+                last_error = str(exc)
+            time.sleep(2)
+        raise TimeoutError(
+            "Timed out waiting for vLLM feedback server to become ready at "
+            f"{self.base_url}; last error: {last_error}; see {self.log_path}.\n"
+            f"{self._log_tail()}"
+        )
+
+    def _log_tail(self, max_chars: int = 4000) -> str:
+        try:
+            text = self.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"Could not read vLLM feedback server log: {exc}"
+        if not text:
+            return "vLLM feedback server log is empty."
+        return "vLLM feedback server log tail:\n" + text[-max_chars:]
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int | None,
+        stop_sequences: Iterable[str],
+    ) -> str:
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "max_tokens": max_new_tokens if max_new_tokens is not None else 256,
+            "temperature": 0.0,
+        }
+        stops = [seq for seq in stop_sequences if seq]
+        if stops:
+            payload["stop"] = stops
+        response = requests.post(
+            f"{self.base_url}/v1/completions",
+            json=payload,
+            timeout=max(60, int(payload["max_tokens"]) * 2),
+        )
+        response.raise_for_status()
+        data = response.json()
+        return str(data["choices"][0].get("text") or "")
+
+    def close(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=30)
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+
 def _language_model(model: AutoModelForCausalLM):
     return model.model.language_model if hasattr(model.model, "language_model") else model.model
 
@@ -1055,16 +1220,24 @@ def _simulate_verbal_feedback(model, tokenizer, task: dict[str, Any], code: str,
     if result.passed and cfg.early_stop_on_pass:
         return "The previous code passed the available tests. Stop the live loop."
     prompt = _format_feedback_prompt(tokenizer, _simulator_prompt(task, code, result, cfg))
-    raw = _generate_after_prompt(
-        model,
-        tokenizer,
-        DynamicCache(),
-        prompt,
-        max_new_tokens=cfg.verbal_feedback_max_new_tokens,
-        decode_press=None,
-        stop_sequences=("\n###", "```", "\n\n---"),
-        require_flashdecode=cfg.require_flashdecode,
-    )
+    stop_sequences = ("\n###", "```", "\n\n---")
+    if isinstance(model, VllmTritonFeedbackClient):
+        raw = model.generate(
+            prompt,
+            max_new_tokens=cfg.verbal_feedback_max_new_tokens,
+            stop_sequences=stop_sequences,
+        )
+    else:
+        raw = _generate_after_prompt(
+            model,
+            tokenizer,
+            DynamicCache(),
+            prompt,
+            max_new_tokens=cfg.verbal_feedback_max_new_tokens,
+            decode_press=None,
+            stop_sequences=stop_sequences,
+            require_flashdecode=cfg.require_flashdecode,
+        )
     feedback = _clean_simulator_feedback(raw)
     if _is_degenerate_feedback(feedback):
         logger.warning("Feedback model output was degenerate; using deterministic feedback fallback.")
@@ -1174,9 +1347,15 @@ class ConvCodeWorldLiveRunner:
                     "require_flashdecode=True requires attn_implementation='flash_attention_3' for the code model."
                 )
             effective_feedback_attn = self.cfg.feedback_attn_implementation or self.cfg.attn_implementation
-            if self.cfg.include_verbal_feedback and not _is_flash_attention_3(effective_feedback_attn):
+            if (
+                self.cfg.include_verbal_feedback
+                and not _is_vllm_triton_attention(effective_feedback_attn)
+                and not _is_flash_attention_3(effective_feedback_attn)
+            ):
                 raise ValueError(
-                    "require_flashdecode=True requires feedback_attn_implementation='flash_attention_3' for the feedback model."
+                    "require_flashdecode=True requires the feedback model to use either "
+                    "feedback_attn_implementation='flash_attention_3' or "
+                    "feedback_attn_implementation='vllm_triton'."
                 )
         _setup_logging(self.cfg.log_level)
         random.seed(self.cfg.seed)
@@ -1254,11 +1433,21 @@ class ConvCodeWorldLiveRunner:
         if not self.cfg.include_verbal_feedback:
             return model, tokenizer, model, tokenizer
         feedback_model_name = self.cfg.feedback_model or self.cfg.model
-        if feedback_model_name == self.cfg.model:
-            return model, tokenizer, model, tokenizer
         feedback_attn_implementation = (
             self.cfg.feedback_attn_implementation or self.cfg.attn_implementation
         )
+        if _is_vllm_triton_attention(feedback_attn_implementation):
+            logger.info("Loading feedback tokenizer for %s", feedback_model_name)
+            feedback_tokenizer = self._load_tokenizer(feedback_model_name)
+            logger.info("Loaded feedback tokenizer for %s", feedback_model_name)
+            feedback_model = VllmTritonFeedbackClient(
+                feedback_model_name,
+                self.cfg,
+                self.output_dir,
+            )
+            return model, tokenizer, feedback_model, feedback_tokenizer
+        if feedback_model_name == self.cfg.model:
+            return model, tokenizer, model, tokenizer
         feedback_model, feedback_tokenizer = self._load_model(
             feedback_model_name,
             feedback_attn_implementation,
@@ -1267,66 +1456,71 @@ class ConvCodeWorldLiveRunner:
 
     def run(self) -> None:
         tasks = _load_tasks(self.cfg)
-        model, tokenizer, feedback_model, feedback_tokenizer = self.setup_models()
-        base_press = _setup_press(self.cfg)
-        global_press = _as_global_press(base_press, self.cfg)
-        scorer = _decode_scorer(global_press)
-        reference_trajectories = (
-            _load_reference_trajectories(self.cfg.feedback_config)
-            if self.cfg.benchmark_mode == "static"
-            else None
-        )
-
-        rows: list[dict[str, Any]] = []
-        for task_idx, task in enumerate(tqdm(tasks, desc=f"ConvCodeWorld {self.cfg.benchmark_mode}"), start=1):
-            task_start = time.perf_counter()
-            task_id = task_get(task, "task_id")
-            logger.info("Starting task %s/%s: %s", task_idx, len(tasks), task_id)
-            if self.cfg.benchmark_mode == "static":
-                task_rows = self._run_task_static(
-                    model,
-                    tokenizer,
-                    task,
-                    reference_trajectories or {},
-                    global_press,
-                    scorer,
-                )
-            else:
-                task_rows = self._run_task(
-                    model,
-                    tokenizer,
-                    feedback_model,
-                    feedback_tokenizer,
-                    task,
-                    global_press,
-                    scorer,
-                )
-            rows.extend(task_rows)
-            logger.info(
-                "Finished task %s/%s: %s in %.1fs",
-                task_idx,
-                len(tasks),
-                task_id,
-                time.perf_counter() - task_start,
+        feedback_model = None
+        try:
+            model, tokenizer, feedback_model, feedback_tokenizer = self.setup_models()
+            base_press = _setup_press(self.cfg)
+            global_press = _as_global_press(base_press, self.cfg)
+            scorer = _decode_scorer(global_press)
+            reference_trajectories = (
+                _load_reference_trajectories(self.cfg.feedback_config)
+                if self.cfg.benchmark_mode == "static"
+                else None
             )
-            torch.cuda.empty_cache()
 
-        df = pd.DataFrame(rows)
-        predictions_jsonl = self.output_dir / "predictions.jsonl"
-        predictions_csv = self.output_dir / "predictions.csv"
-        metrics_path = self.output_dir / "metrics.json"
-        config_path = self.output_dir / "config.yaml"
+            rows: list[dict[str, Any]] = []
+            for task_idx, task in enumerate(tqdm(tasks, desc=f"ConvCodeWorld {self.cfg.benchmark_mode}"), start=1):
+                task_start = time.perf_counter()
+                task_id = task_get(task, "task_id")
+                logger.info("Starting task %s/%s: %s", task_idx, len(tasks), task_id)
+                if self.cfg.benchmark_mode == "static":
+                    task_rows = self._run_task_static(
+                        model,
+                        tokenizer,
+                        task,
+                        reference_trajectories or {},
+                        global_press,
+                        scorer,
+                    )
+                else:
+                    task_rows = self._run_task(
+                        model,
+                        tokenizer,
+                        feedback_model,
+                        feedback_tokenizer,
+                        task,
+                        global_press,
+                        scorer,
+                    )
+                rows.extend(task_rows)
+                logger.info(
+                    "Finished task %s/%s: %s in %.1fs",
+                    task_idx,
+                    len(tasks),
+                    task_id,
+                    time.perf_counter() - task_start,
+                )
+                torch.cuda.empty_cache()
 
-        df.to_json(predictions_jsonl, orient="records", lines=True)
-        df.to_csv(predictions_csv, index=False)
-        metrics = SCORER_REGISTRY["convcodeworld"](df)
-        metrics["git_revision"] = _git_revision()
-        metrics["config"] = asdict(self.cfg)
-        metrics["global_target"] = self.global_target
-        metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-        config_path.write_text(yaml.dump(asdict(self.cfg), sort_keys=False), encoding="utf-8")
-        logger.info("Wrote %s, %s, and %s", predictions_jsonl, predictions_csv, metrics_path)
-        logger.info("Metrics: %s", json.dumps(metrics, indent=2))
+            df = pd.DataFrame(rows)
+            predictions_jsonl = self.output_dir / "predictions.jsonl"
+            predictions_csv = self.output_dir / "predictions.csv"
+            metrics_path = self.output_dir / "metrics.json"
+            config_path = self.output_dir / "config.yaml"
+
+            df.to_json(predictions_jsonl, orient="records", lines=True)
+            df.to_csv(predictions_csv, index=False)
+            metrics = SCORER_REGISTRY["convcodeworld"](df)
+            metrics["git_revision"] = _git_revision()
+            metrics["config"] = asdict(self.cfg)
+            metrics["global_target"] = self.global_target
+            metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+            config_path.write_text(yaml.dump(asdict(self.cfg), sort_keys=False), encoding="utf-8")
+            logger.info("Wrote %s, %s, and %s", predictions_jsonl, predictions_csv, metrics_path)
+            logger.info("Metrics: %s", json.dumps(metrics, indent=2))
+        finally:
+            if isinstance(feedback_model, VllmTritonFeedbackClient):
+                feedback_model.close()
 
     def _run_task(
         self,
@@ -1681,6 +1875,12 @@ def run(config: ConvCodeWorldLiveConfig | None = None, config_file: Optional[str
     ).strip()
     if env_feedback_attn_implementation:
         args["feedback_attn_implementation"] = env_feedback_attn_implementation
+    env_feedback_vllm_cuda_visible_devices = os.environ.get(
+        "KV_PRESS_CONVCODEWORLD_FEEDBACK_VLLM_CUDA_VISIBLE_DEVICES",
+        "",
+    ).strip()
+    if env_feedback_vllm_cuda_visible_devices:
+        args["feedback_vllm_cuda_visible_devices"] = env_feedback_vllm_cuda_visible_devices
     cfg_kwargs = {k: v for k, v in args.items() if k in ConvCodeWorldLiveConfig.__dataclass_fields__}
     cfg = ConvCodeWorldLiveConfig(**cfg_kwargs)
     ConvCodeWorldLiveRunner(cfg).run()

@@ -8,9 +8,9 @@ common_args=(
   evaluation/benchmarks/convcodeworld/modal_app.py::run_convcodeworld_live
   --benchmark-mode live
   --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  --feedback-model google/gemma-3-4b-it
+  --feedback-model google/gemma-4-26B-A4B-it
   --attn-implementation flash_attention_3
-  --feedback-attn-implementation flash_attention_3
+  --feedback-attn-implementation vllm_triton
   --feedback-config CF_EF_UNIT_SNF
   --press-name no_press
   --compression-ratio 0.0
