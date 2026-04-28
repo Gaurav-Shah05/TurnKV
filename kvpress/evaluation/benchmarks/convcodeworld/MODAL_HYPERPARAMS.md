@@ -162,6 +162,7 @@ The scripts accept Hugging Face credentials from `HF_TOKEN`,
 |---|---|---:|---:|
 | `228`, `20pct`, `tune20` | `tune_20pct_seed42` | 228 | 22-23 tasks per shard |
 | `100`, `100tasks`, `small`, `tune100` | `tune_100tasks_seed42` | 100 | 10 tasks per shard |
+| `570`, `50pct`, `tune50` | `tune_50pct_seed42` | 570 | ~57 tasks per shard |
 | Any other value | Used directly as the shard stem | Depends on the split file | Depends on the shard files |
 
 The split selector changes which files under
@@ -169,7 +170,7 @@ The split selector changes which files under
 `--task-ids @...`. It does not change `NUM_SHARDS`; if you override
 `NUM_SHARDS`, matching shard files must already exist.
 
-The new 100-task split is:
+The 100-task split is:
 
 ```text
 evaluation/benchmarks/convcodeworld/splits/tune_100tasks_seed42.json
@@ -182,6 +183,73 @@ It was sampled from `tune_20pct_seed42.json` with seed `42`, selecting 100 task
 IDs and then preserving the source split order before interleaved sharding. See
 `tune_100tasks_seed42_manifest.json` and
 `tune_100tasks_seed42_shards_manifest.json` for provenance and per-shard hashes.
+
+The 50% split is:
+
+```text
+evaluation/benchmarks/convcodeworld/splits/tune_50pct_seed42.json        (570 tasks)
+evaluation/benchmarks/convcodeworld/splits/holdout_50pct_seed42.json     (570 tasks)
+evaluation/benchmarks/convcodeworld/splits/split_50pct_manifest.json
+evaluation/benchmarks/convcodeworld/splits/shards/tune_50pct_seed42_shard_0_of_10.json
+...
+evaluation/benchmarks/convcodeworld/splits/shards/tune_50pct_seed42_shard_9_of_10.json
+```
+
+It was built from the combined universe of `tune_20pct_seed42.json` (228 tasks) and
+`holdout_80pct_seed42.json` (912 tasks) using the same `random.Random(42).sample`
+algorithm as `scripts/build_split.py`. Provenance is in `splits/split_50pct_manifest.json`.
+
+Sample run (shard 0 only, ~57 tasks, for environment issue inspection):
+
+```bash
+cd kvpress
+MODAL_HF_SECRET_NAME=hf-secret \
+  evaluation/benchmarks/convcodeworld/modal_run_sample_no_press_50pct.sh
+```
+
+Full 10-shard run after confirming the sample shard is clean:
+
+```bash
+cd kvpress
+CONFIG_LABEL=no_press_global4096_local2048_compressratio0.0_split570 \
+  evaluation/benchmarks/convcodeworld/modal_run_smoke_no_press.sh \
+  --split 570
+```
+
+After each run, retrieve `predictions.jsonl` and inspect for executor environment errors:
+
+```bash
+modal volume get kvpress-convcodeworld-results \
+  sample_50pct_no_press_fullkv_shard0/predictions.jsonl \
+  ./predictions_sample_shard0.jsonl
+
+python evaluation/benchmarks/convcodeworld/inspect_predictions.py \
+  --input ./predictions_sample_shard0.jsonl
+```
+
+## 50%-Split Full-Cache Batch Run (2026-04-28)
+
+All 10 shards dispatched in parallel via:
+
+```bash
+cd kvpress/
+MODAL_PROFILE=pganesh MODAL_HF_SECRET_NAME=hf-secret MODAL_BUILD_VALIDATION=warn \
+  CONFIG_LABEL=no_press_global4096_local2048_compressratio0.0_split570 \
+  evaluation/benchmarks/convcodeworld/modal_run_smoke_no_press.sh --split 50pct
+```
+
+| Property | Value |
+|---|---|
+| Split file | `splits/tune_50pct_seed42.json` (570 tasks, seed 42) |
+| Shards | 10 × 57 tasks, interleaved (`splits/shards/tune_50pct_seed42_shard_{0..9}_of_10.json`) |
+| Config label | `no_press_global4096_local2048_compressratio0.0_split570` |
+| Modal profile | `pganesh` |
+| Batch timestamp | `20260428_175149` |
+| Diag dir | `.modal_diag/no_press_no_press_global4096_local2048_compressratio0.0_split570_tune_50pct_seed42_live_smoke_20260428_175149/` |
+| Volume output | `no_press_no_press_global4096_local2048_compressratio0.0_split570_tune_50pct_seed42_live_smoke_20260428_175149/shard_{N}_of_10/` |
+| Environment fixes applied | `django>=4.2`, `requests-mock>=1.12`, `wordcloud>=1.9` added to `MODAL_EVAL_REQUIREMENTS`; `MAX_JOBS=4` for FA3 build |
+
+---
 
 ## `modal_run.sh` Preset
 

@@ -1,0 +1,15 @@
+{
+  "dataset": "ConvCodeWorld/convcodebench",
+  "feedback_config": "CF_EF_UNIT_SNF",
+  "seed": 42,
+  "tune_fraction": 0.5,
+  "n_total": 1140,
+  "n_tune": 570,
+  "n_holdout": 570,
+  "tune_path": "tune_50pct_seed42.json",
+  "holdout_path": "holdout_50pct_seed42.json",
+  "tune_sha256": "a50c4fa0f17a33acc270d6e7faf4c0ad0f324301d6d8c975dae8f2c334453ccd",
+  "holdout_sha256": "f9cdb5054d024aa1cc2cde5f80eaed8f11b0d7de064e39f2fc4dda8e8b846c58",
+  "stratification": "none (random sampling, sorted-lexicographic universe)",
+  "note": "Built from existing tune_20pct_seed42.json + holdout_80pct_seed42.json universe; same algorithm as build_split.py"
+}

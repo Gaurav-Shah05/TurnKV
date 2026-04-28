@@ -1,0 +1,68 @@
+{
+  "input": "C:\\Users\\Prodyut\\Downloads\\TurnKV\\kvpress\\evaluation\\benchmarks\\convcodeworld\\splits\\tune_50pct_seed42.json",
+  "num_shards": 10,
+  "n_total": 570,
+  "stride_strategy": "interleaved (idx % num_shards)",
+  "shards": [
+    {
+      "shard": 0,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_0_of_10.json",
+      "sha256": "fad8bfabe242d08769f7a3583c199dc7eccad7f5c134ce90f6f5600ac720f43a"
+    },
+    {
+      "shard": 1,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_1_of_10.json",
+      "sha256": "554f94d3edc31befd871b5cb5bbd5bf0c8803ddfafdac6aefbb761865db170ce"
+    },
+    {
+      "shard": 2,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_2_of_10.json",
+      "sha256": "bb24c11b2d6901274852a4ab9ad31d05ac66204280dad8987bda0ca20d011b0d"
+    },
+    {
+      "shard": 3,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_3_of_10.json",
+      "sha256": "6cd51b947459e0d883b4148bee42cdd0640a2568a37941ef358a6847a94deb86"
+    },
+    {
+      "shard": 4,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_4_of_10.json",
+      "sha256": "1d142db95438b99868f6f8d93065c3f505eb92201ab5cd253c1cb54251c2664d"
+    },
+    {
+      "shard": 5,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_5_of_10.json",
+      "sha256": "5f2be5da534d01bd90fb472a48412e2c740c50127df868f4a4c733de016c7e7f"
+    },
+    {
+      "shard": 6,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_6_of_10.json",
+      "sha256": "e1fd34e1964ce2d66fea18a562bb58a4d027e9ac5fa171ab17f55634f7266861"
+    },
+    {
+      "shard": 7,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_7_of_10.json",
+      "sha256": "82716bb46724121f0671a7036c831547ef2f5119b461d478fd818616a84f2e56"
+    },
+    {
+      "shard": 8,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_8_of_10.json",
+      "sha256": "0c0d7d55cb5e84797604eea13f93938630f98b7636ad2b61115d452519595110"
+    },
+    {
+      "shard": 9,
+      "size": 57,
+      "path": "tune_50pct_seed42_shard_9_of_10.json",
+      "sha256": "0cc419e507535201cee8932f20d2ceccb55ddc62bdd043e5461960c15d875e24"
+    }
+  ]
+}

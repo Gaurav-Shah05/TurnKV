@@ -45,7 +45,7 @@ FLASH_ATTN3_BUILD_ENV = (
     "FLASH_ATTENTION_DISABLE_SPLIT=TRUE "
     "FLASH_ATTENTION_DISABLE_FP16=TRUE "
     "FLASH_ATTENTION_DISABLE_FP8=TRUE "
-    "MAX_JOBS=8 NVCC_THREADS=2"
+    "MAX_JOBS=4 NVCC_THREADS=2"
 )
 MODAL_EVAL_REQUIREMENTS = (
     "numpy>=2.0.0,<3",
@@ -74,6 +74,11 @@ MODAL_EVAL_REQUIREMENTS = (
     "sentencepiece>=0.2.0,<0.3",
     "protobuf>=5.27.2,<6",
     "einops>=0.8.0,<1",
+    # Added after inspecting predictions.jsonl from the 50%-split shard-0 sample run.
+    # BigCodeBench tasks in this split require these packages in the executor sandbox.
+    "django>=4.2,<6",
+    "requests-mock>=1.12,<2",
+    "wordcloud>=1.9,<2",
 )
 VLLM_INSTALL_COMMAND = (
     "uv pip install --python /root/kvpress/.venv/bin/python --upgrade --pre vllm "

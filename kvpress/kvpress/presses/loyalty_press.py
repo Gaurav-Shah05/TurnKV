@@ -120,6 +120,52 @@ class LoyaltyPress(TurnAwareMixin):
         self._loyalty_counts = None
         self._decode_step_counter = {}
 
+    def _compute_remapped_loyalty(self, kept: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return a new loyalty-count tensor remapped to post-compression positions.
+
+        Pure — does not mutate ``self``.  Called by
+        :meth:`TurnAwareGlobalPress._remap_all_state` which batches all
+        policy computations before applying any mutations.
+
+        Parameters
+        ----------
+        kept : torch.Tensor
+            1-D CPU int64 tensor of length ``n_kept`` where
+            ``kept[new_pos] = old_pos``, sorted ascending.
+
+        Returns ``None`` when there are no counts to remap (``_loyalty_counts``
+        is None), so the caller can skip the assignment.
+
+        ``_current_turn_start_kv`` is NOT updated because :meth:`on_turn_start`
+        always refreshes it before the next :meth:`update_loyalty` call.
+        """
+        if self._loyalty_counts is None:
+            return None
+        device = self._loyalty_counts.device
+        kept_gpu = kept.to(device=device, dtype=torch.int64)
+        n_kept = kept_gpu.shape[0]
+        cap = self._loyalty_counts.shape[0]
+        valid_mask = kept_gpu < cap
+        new_counts = torch.zeros(n_kept, dtype=torch.int32, device=device)
+        if valid_mask.any():
+            valid_new = valid_mask.nonzero(as_tuple=False).squeeze(1)
+            valid_old = kept_gpu[valid_mask]
+            new_counts[valid_new] = self._loyalty_counts[valid_old]
+        return new_counts
+
+    def remap_loyalty_after_compression(self, kept: torch.Tensor) -> None:
+        """Remap ``_loyalty_counts`` to post-compression cache positions.
+
+        Convenience mutating wrapper around
+        :meth:`_compute_remapped_loyalty`.  Prefer calling
+        :meth:`TurnAwareGlobalPress._remap_all_state` which applies all
+        policy remaps atomically; call this directly only in tests or
+        one-off scenarios where a single policy needs updating.
+        """
+        new_counts = self._compute_remapped_loyalty(kept)
+        if new_counts is not None:
+            self._loyalty_counts = new_counts
+
     def _ensure_counts_capacity(self, min_size: int, device: torch.device) -> None:
         """Allocate / grow ``_loyalty_counts`` to fit at least ``min_size``
         positions, preserving accumulated counts when the tensor grows.

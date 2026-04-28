@@ -33,9 +33,10 @@ DEFAULT_SHARD_STEM="tune_20pct_seed42"
 SHARD_STEM="${SHARD_STEM:-$DEFAULT_SHARD_STEM}"
 
 usage() {
-  echo "Usage: $(basename "$0") [--split 228|100|<split-stem>] [--gpu-spec H200] [--background-modal-cli|--foreground-modal-cli]" >&2
+  echo "Usage: $(basename "$0") [--split 228|100|570|<split-stem>] [--gpu-spec H200] [--background-modal-cli|--foreground-modal-cli]" >&2
   echo "  228 -> tune_20pct_seed42 (228 tasks, ~23 per shard)" >&2
   echo "  100     -> tune_100tasks_seed42 (100 tasks, 10 per shard)" >&2
+  echo "  570     -> tune_50pct_seed42 (570 tasks, ~57 per shard)" >&2
   echo "  --gpu-spec sets the Modal GPU request for each shard (default: ${MODAL_GPU_SPEC})" >&2
   echo "  --background-modal-cli submits all shards without waiting for each Modal CLI process (default: ${BACKGROUND_MODAL_CLI})" >&2
 }
@@ -97,6 +98,9 @@ case "$SHARD_STEM" in
   100|100tasks|small|tune100)
     SHARD_STEM="tune_100tasks_seed42"
     ;;
+  570|50pct|tune50)
+    SHARD_STEM="tune_50pct_seed42"
+    ;;
 esac
 
 case "$BACKGROUND_MODAL_CLI" in
@@ -145,6 +149,9 @@ fi
 # this is harmless under WSL/Linux too.
 export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 export PYTHONUTF8="${PYTHONUTF8:-1}"
+# Downgrade the build-validation check from error to warning so that
+# pre-existing LF/CRLF line-ending discrepancies on Windows don't block the run.
+export MODAL_BUILD_VALIDATION="${MODAL_BUILD_VALIDATION:-warn}"
 
 LOG_ROOT="$script_dir/../../../../.modal_diag"
 mkdir -p "$LOG_ROOT"

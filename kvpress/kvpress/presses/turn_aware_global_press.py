@@ -185,22 +185,44 @@ class TurnAwareGlobalPress(BasePress):
         the initial pre-first-turn compress cleanly and preserves the
         ``test_all_alphas_zero_equivalent_to_base`` regression guard.
         """
+        new_keys, new_values, _ = self._compress_impl(
+            module, hidden_states, keys, values, attentions, kwargs
+        )
+        return new_keys, new_values
+
+    def _compress_impl(
+        self,
+        module: nn.Module,
+        hidden_states: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        attentions: Optional[torch.Tensor],
+        kwargs: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Like :meth:`compress` but also returns the ``all_kept`` index
+        tensor (shape ``(bsz, nkv_heads, n_kept)``, dtype ``int64``) so
+        callers such as :meth:`run_global_compression` can remap policy
+        state after eviction.  Returns ``None`` for ``all_kept`` whenever
+        a short-circuit path is taken (no eviction actually occurred).
+        """
         ratio = self.base_press.compression_ratio
         if ratio == 0:
-            return keys, values
+            return keys, values, None
 
         # Short-circuit 1: all alphas 0 -> baseline behaviour. Keeps
         # baseline_snapkv-style registry entries bit-identical to stock
         # SnapKVPress.
         if self._all_alphas_zero():
-            return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            new_k, new_v = self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            return new_k, new_v, None
 
         # Short-circuit 2: no turn structure to leverage yet. Degrade to
         # plain base compression. Policies share turn_boundaries via the
         # composer's on_turn_end dispatch, so checking any one is fine.
         first_policy = next(iter(self.policies.values()), None)
         if first_policy is None or not first_policy.turn_boundaries:
-            return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            new_k, new_v = self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            return new_k, new_v, None
 
         k_len = keys.shape[2]
         bsz, num_kv_heads, _, head_dim = keys.shape
@@ -208,13 +230,14 @@ class TurnAwareGlobalPress(BasePress):
         turn_budgets, context_spans = self._compute_turn_budgets(k_len)
 
         if not turn_budgets and not context_spans:
-            return self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            new_k, new_v = self.base_press.compress(module, hidden_states, keys, values, attentions, kwargs)
+            return new_k, new_v, None
 
         # If our total kept already fits (or exceeds) the cache, there is
         # nothing to evict. Happens when budgets + context >= k_len.
         total_kept = sum(ce - cs for cs, ce in context_spans) + sum(b for _, _, b in turn_budgets.values())
         if total_kept >= k_len:
-            return keys, values
+            return keys, values, None
 
         # Base scoring is per-layer; upcast to fp32 so small alpha*loyalty
         # bumps do not underflow bf16 and so topk ties resolve deterministically.
@@ -279,7 +302,7 @@ class TurnAwareGlobalPress(BasePress):
             kept_chunks.append(top_local + ts)
 
         if not kept_chunks:
-            return keys, values
+            return keys, values, None
 
         # Concatenate and sort for positional locality (RoPE-friendly, and
         # downstream attention kernels that assume monotonic positions).
@@ -289,7 +312,7 @@ class TurnAwareGlobalPress(BasePress):
         indices_expanded = all_kept.unsqueeze(-1).expand(-1, -1, -1, head_dim)
         new_keys = keys.gather(2, indices_expanded).contiguous()
         new_values = values.gather(2, indices_expanded).contiguous()
-        return new_keys, new_values
+        return new_keys, new_values, all_kept
 
     def _compute_turn_budgets(
         self, k_len: int
@@ -419,6 +442,38 @@ class TurnAwareGlobalPress(BasePress):
 
         return turn_budgets, context_spans
 
+    def _remap_all_state(self, kept: torch.Tensor) -> None:
+        """Remap every policy's turn boundaries and loyalty counts to the
+        new (post-compression) cache positions described by ``kept``.
+
+        Parameters
+        ----------
+        kept : torch.Tensor
+            1-D CPU int64 tensor of length ``n_kept`` where
+            ``kept[new_pos] = old_pos``, sorted ascending.  Produced by
+            taking batch 0 / head 0 of the ``all_kept`` tensor returned by
+            :meth:`_compress_impl` for a representative layer.
+
+        Both remaps are computed for ALL policies before any policy's state
+        is mutated, so a mid-loop exception cannot leave some policies
+        remapped and others not.
+        """
+        # Compute new boundaries for every policy first (pure, no mutation).
+        remapped: list[tuple] = []
+        for policy in self.policies.values():
+            new_boundaries = policy._compute_remapped_boundaries(kept)
+            new_loyalty = (
+                policy._compute_remapped_loyalty(kept)
+                if hasattr(policy, "_compute_remapped_loyalty")
+                else None
+            )
+            remapped.append((policy, new_boundaries, new_loyalty))
+        # Apply all updates atomically.
+        for policy, new_boundaries, new_loyalty in remapped:
+            policy.turn_boundaries = new_boundaries
+            if new_loyalty is not None:
+                policy._loyalty_counts = new_loyalty
+
     def _all_alphas_zero(self) -> bool:
         return all(abs(float(self.alphas.get(name, 0.0))) == 0.0 for name in self.policies)
 
@@ -453,6 +508,11 @@ class TurnAwareGlobalPress(BasePress):
         self.global_budget = effective_target
         try:
             language_model = model.model.language_model if hasattr(model.model, "language_model") else model.model
+            # canonical_kept: kept indices from the first successfully compressed
+            # layer (batch 0, head 0), used after the loop to remap policy state.
+            # All layers share the same turn-budget structure so one layer
+            # provides an accurate positional skeleton for boundary remapping.
+            canonical_kept: Optional[torch.Tensor] = None
             for layer in language_model.layers:
                 module = layer.self_attn
                 layer_idx = getattr(module, "layer_idx", None)
@@ -465,8 +525,12 @@ class TurnAwareGlobalPress(BasePress):
                     # Gemma3 sliding-window); nothing to compress.
                     continue
                 keys, values = extract_keys_and_values(cache, layer_idx)
-                new_keys, new_values = self.compress(module, hidden_states, keys, values, None, kwargs)
+                new_keys, new_values, layer_kept = self._compress_impl(
+                    module, hidden_states, keys, values, None, kwargs
+                )
                 self._write_layer(cache, layer_idx, new_keys, new_values)
+                if canonical_kept is None and layer_kept is not None:
+                    canonical_kept = layer_kept[0, 0].cpu()
             cache_len_after = cache.get_seq_length()
             logger.info(
                 "Applied global compression: cache=%s->%s target=%s budget=%s",
@@ -475,6 +539,11 @@ class TurnAwareGlobalPress(BasePress):
                 effective_target,
                 orig_budget,
             )
+            # Remap all policy state so turn_boundaries and loyalty counts
+            # reference new (post-eviction) cache positions rather than the
+            # stale old ones.
+            if canonical_kept is not None:
+                self._remap_all_state(canonical_kept)
         finally:
             self.base_press.compression_ratio = orig_ratio
             self.global_budget = orig_budget

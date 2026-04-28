@@ -367,3 +367,83 @@ def test_budget_hit(unit_test_model):  # noqa: F811
     )
     assert torch.equal(k_stock, k_wrapped), "no-turns short-circuit must match base-press keys"
     assert torch.equal(v_stock, v_wrapped), "no-turns short-circuit must match base-press values"
+
+
+def test_remap_boundaries_after_compression():
+    """Unit test for TurnAwareMixin.remap_boundaries.
+
+    Simulates three boundaries (context, user, assistant) against a ``kept``
+    tensor that evicts a hole from the user span and the entire assistant span.
+    Verifies that:
+    - context span remaps exactly (all positions kept),
+    - user span contracts to the surviving sub-range,
+    - fully-evicted assistant span is dropped,
+    - a ``kept`` that is a subset of positions in only one span still works.
+    """
+    mixin = TurnAwareMixin()
+    # context [0, 50), turn1-user [50, 100), turn1-assistant [100, 150)
+    mixin.on_turn_end(turn_idx=0, role="context", start_kv=0, end_kv=50)
+    mixin.on_turn_end(turn_idx=1, role="user", start_kv=50, end_kv=100)
+    mixin.on_turn_end(turn_idx=1, role="assistant", start_kv=100, end_kv=150)
+
+    # kept: keep all of [0,50), keep [50,70) and [80,100) from user span,
+    # evict all of [100,150) (assistant span fully dropped).
+    context_pos = list(range(0, 50))     # 50 tokens kept
+    user_pos = list(range(50, 70)) + list(range(80, 100))  # 40 tokens kept; hole at [70,80)
+    kept = torch.tensor(context_pos + user_pos, dtype=torch.int64)
+
+    mixin.remap_boundaries(kept)
+
+    assert len(mixin.turn_boundaries) == 2, "assistant span (fully evicted) must be dropped"
+
+    ctx_b = mixin.turn_boundaries[0]
+    assert ctx_b.turn_idx == 0 and ctx_b.role == "context"
+    # Context occupies new positions [0, 50) since it is the prefix
+    assert ctx_b.start_kv == 0
+    assert ctx_b.end_kv == 50
+
+    user_b = mixin.turn_boundaries[1]
+    assert user_b.turn_idx == 1 and user_b.role == "user"
+    # User's first surviving new position: index 50 in kept (old pos 50)
+    # User's last surviving new position: index 89 in kept (old pos 99)
+    assert user_b.start_kv == 50
+    assert user_b.end_kv == 90  # last surviving index 89 + 1
+
+
+def test_remap_loyalty_after_compression():
+    """Unit test for LoyaltyPress.remap_loyalty_after_compression.
+
+    Sets up a known ``_loyalty_counts`` pattern, evicts some positions,
+    and verifies that:
+    - surviving positions' counts move to the correct new indices,
+    - evicted positions contribute zero to the new counts,
+    - positions beyond the allocated capacity are handled safely.
+    """
+    loyalty = LoyaltyPress()
+
+    # Manually set counts for old positions 0-9 (cap=16, next pow2 >= 10)
+    loyalty._loyalty_counts = torch.tensor(
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 0, 0, 0, 0], dtype=torch.int32
+    )
+
+    # kept: keep old positions 0, 2, 4, 6, 8 (evict odds and positions 10-15)
+    kept = torch.tensor([0, 2, 4, 6, 8], dtype=torch.int64)
+
+    loyalty.remap_loyalty_after_compression(kept)
+
+    assert loyalty._loyalty_counts is not None
+    assert loyalty._loyalty_counts.shape[0] == 5, "new counts must have exactly n_kept entries"
+
+    expected = torch.tensor([1, 3, 5, 7, 9], dtype=torch.int32)
+    assert torch.equal(loyalty._loyalty_counts, expected), (
+        f"remapped counts {loyalty._loyalty_counts.tolist()} != expected {expected.tolist()}"
+    )
+
+    # Edge case: kept includes a position beyond the allocated capacity.
+    # Should silently skip those positions (out-of-bounds old indices).
+    loyalty2 = LoyaltyPress()
+    loyalty2._loyalty_counts = torch.tensor([10, 20], dtype=torch.int32)  # cap=2
+    kept_oob = torch.tensor([0, 5], dtype=torch.int64)  # old pos 5 is out of bounds
+    loyalty2.remap_loyalty_after_compression(kept_oob)
+    assert loyalty2._loyalty_counts[0].item() == 10, "in-bounds position must preserve count"
+    assert loyalty2._loyalty_counts[1].item() == 0, "out-of-bounds position must map to zero"

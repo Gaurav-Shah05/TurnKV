@@ -17,9 +17,10 @@ class TurnBoundary:
     A half-open span ``[start_kv, end_kv)`` in the KV cache covering one
     turn's tokens. The harness (``multi_turn_evaluate.py``) constructs these
     and hands them to turn-aware presses through ``TurnAwareMixin`` callbacks
-    (ADR 001 §4). Tokens are addressed by their position inside the KV cache,
-    so boundaries remain valid after global compression only if the cache has
-    not been rewritten since they were recorded.
+    (ADR 001 §4). Tokens are addressed by their position inside the KV cache.
+    After global compression the composer calls :meth:`TurnAwareMixin.remap_boundaries`
+    to update all spans to the new (post-eviction) cache coordinates, so
+    boundaries remain valid across compression events.
 
     Parameters
     ----------
@@ -73,10 +74,11 @@ class TurnAwareMixin:
         aggregates must group-by ``turn_idx``; they must not assume
         ``turn_boundaries[k].turn_idx == k``.
     loyalty : dict[int, int]
-        Per-KV-position loyalty count; only populated by ``LoyaltyPress``.
-        Keyed by absolute KV position at the time of accumulation. If global
-        compression shifts positions, ``LoyaltyPress`` is responsible for
-        remapping the dict along the same indices applied to keys/values.
+        Legacy field retained for type-compatibility. ``LoyaltyPress`` does
+        not write to this dict; it uses its own ``_loyalty_counts`` tensor
+        instead (see ``LoyaltyPress.loyalty_as_dict`` for a debug view).
+        After compression, ``LoyaltyPress.remap_loyalty_after_compression``
+        remaps the tensor; this dict stays empty throughout normal operation.
     current_turn : int
         Index of the turn currently being prefilled or generated, set by
         ``on_turn_start`` and read by policy A's decay term and by policy C's
@@ -171,6 +173,49 @@ class TurnAwareMixin:
             device=device if device is not None else torch.device("cpu"),
             dtype=dtype if dtype is not None else torch.float32,
         )
+
+    def _compute_remapped_boundaries(self, kept: torch.Tensor) -> "list[TurnBoundary]":
+        """Return a new boundary list remapped to post-compression positions.
+
+        Pure — does not mutate ``self``.  Called by
+        :meth:`TurnAwareGlobalPress._remap_all_state` which batches all
+        policy computations before applying any mutations.
+
+        Parameters
+        ----------
+        kept : torch.Tensor
+            1-D CPU int64 tensor of length ``n_kept`` where
+            ``kept[new_pos] = old_pos``, sorted ascending.
+
+        Spans fully evicted are dropped.  Surviving spans contract to the
+        tightest ``[first_new_pos, last_new_pos + 1)`` covering their tokens.
+        Because turns are non-overlapping sequential spans and ``kept`` is
+        sorted, surviving tokens from each turn always form a contiguous
+        block in the new cache — so first/last index give the exact span.
+        """
+        new_boundaries = []
+        for b in self.turn_boundaries:
+            mask = (kept >= b.start_kv) & (kept < b.end_kv)
+            indices = mask.nonzero(as_tuple=False).squeeze(1)
+            if indices.numel() == 0:
+                continue
+            new_start = int(indices[0].item())
+            new_end = int(indices[-1].item()) + 1
+            new_boundaries.append(
+                TurnBoundary(turn_idx=b.turn_idx, start_kv=new_start, end_kv=new_end, role=b.role)
+            )
+        return new_boundaries
+
+    def remap_boundaries(self, kept: torch.Tensor) -> None:
+        """Remap ``turn_boundaries`` to post-compression cache positions.
+
+        Convenience mutating wrapper around
+        :meth:`_compute_remapped_boundaries`.  Prefer calling
+        :meth:`TurnAwareGlobalPress._remap_all_state` which applies all
+        policy remaps atomically; call this directly only in tests or
+        one-off scenarios where a single policy needs updating.
+        """
+        self.turn_boundaries = self._compute_remapped_boundaries(kept)
 
     def reset_turn_state(self) -> None:
         """Clear per-conversation state. Harness calls between sessions/probes."""
