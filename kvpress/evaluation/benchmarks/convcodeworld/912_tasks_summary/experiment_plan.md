@@ -1,0 +1,2 @@
+./kvpress/evaluation/benchmarks/convcodeworld/modal_run_smoke_no_press.sh --split 912 --gpu-spec H200 --background-modal-cli : with global budget = 512, 1024, 2048, 4096
+./kvpress/evaluation/benchmarks/convcodeworld/modal_run_smoke_baseline_snapkv.sh --split 912 --gpu-spec H200 --background-modal-cli : with global budget = 512, 1024, 2048, 4096

@@ -1,0 +1,63 @@
+{
+  "metadata": {
+    "purpose": "ConvCodeWorld 912-task hold-out summary for no-press and baseline SnapKV.",
+    "baseline_source": "modal_run_smoke_baseline_snapkv.sh",
+    "split": "holdout_80pct_seed42",
+    "modal_volume": "kvpress-convcodeworld-results",
+    "note": "No-press aggregate uses the 37 completed shards only; shards 2, 19, and 24 failed with CUDA OOM in the launcher logs."
+  },
+  "configs": [
+    {
+      "CONFIG_LABEL": "no_press_global4096_local2048_maxtokens1024_compressratio0.0_split912",
+      "source_run_dir": "no_press_holdout_80pct_seed42_live_smoke_20260428_195617",
+      "completed_shards": 37,
+      "missing_shards": [
+        2,
+        19,
+        24
+      ],
+      "args": {
+        "--press-name": "no_press",
+        "--full-kv-cache": true,
+        "--global-budget": 4096,
+        "--local-budget": 2048,
+        "--max-new-tokens": 1024,
+        "--compression-ratio": 0.0,
+        "--code-generation-until-eos": true
+      },
+      "average_final_pass_rate": 73.54685646500593,
+      "average_turns_to_first_pass": 2.253225806451613,
+      "failed_tasks": 223,
+      "passed_tasks": 620,
+      "total_tasks": 843,
+      "global_cache_per_task": {
+        "average": 3947.6310794780547,
+        "median": 1751,
+        "max": 19201
+      },
+      "local_cache_per_turn": {
+        "average": 917.5221946512269,
+        "median": 795,
+        "max": 2942
+      }
+    },
+    {
+      "CONFIG_LABEL": "baseline_snapkv_global2048_local4096_maxtokens4096_compressratio0.5_split912",
+      "source_run_dir": "baseline_snapkv_baseline_snapkv_global2048_local4096_maxtokens4096_compressratio0.5_split912_holdout_80pct_seed42_live_smoke_20260428_204027",
+      "completed_shards": 40,
+      "missing_shards": [],
+      "args": {
+        "--press-name": "snapkv",
+        "--global-budget": 2048,
+        "--local-budget": 4096,
+        "--max-new-tokens": 4096,
+        "--compression-ratio": 0.5
+      },
+      "average_final_pass_rate": 63.48684210526315,
+      "average_turns_to_first_pass": 1.846286701208981,
+      "failed_tasks": 333,
+      "passed_tasks": 579,
+      "total_tasks": 912
+    }
+  ]
+}

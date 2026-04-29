@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Smoke run #0 (full KV): no press / no KV-cache compression on the 228-task
-# 20% tune split, fanned out to 10 detached Modal containers (one per shard,
-# ~23 tasks each on its own H200). Same model + prompt config as the SnapKV
-# smoke runs so this is the uncompressed control.
+# Smoke run #0 (full KV): no press / no KV-cache compression. Defaults to the
+# 228-task 20% tune split; pass --split 912 to run the complementary 912-task
+# holdout split. Tune/small splits use 10 shards by default; the 912-task
+# holdout uses 40 shards by default.
 #
 # Profile: ypatlola (override via MODAL_PROFILE=...).
 set -euo pipefail
@@ -11,6 +11,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir/../../.."
 
 MODAL_PROFILE="${MODAL_PROFILE:-ypatlola}"
+if [[ -v NUM_SHARDS ]]; then
+  NUM_SHARDS_WAS_SET=true
+else
+  NUM_SHARDS_WAS_SET=false
+fi
 NUM_SHARDS="${NUM_SHARDS:-10}"
 # BENCHMARK_MODE: "live" uses the model's own generated code as prior context
 # and live feedback; "static" uses teacher-forced reference prior code/feedback.
@@ -33,9 +38,10 @@ DEFAULT_SHARD_STEM="tune_20pct_seed42"
 SHARD_STEM="${SHARD_STEM:-$DEFAULT_SHARD_STEM}"
 
 usage() {
-  echo "Usage: $(basename "$0") [--split 228|100|<split-stem>] [--gpu-spec H200] [--background-modal-cli|--foreground-modal-cli]" >&2
+  echo "Usage: $(basename "$0") [--split 228|912|100|<split-stem>] [--gpu-spec H200] [--background-modal-cli|--foreground-modal-cli]" >&2
   echo "  228 -> tune_20pct_seed42 (228 tasks, ~23 per shard)" >&2
-  echo "  100     -> tune_100tasks_seed42 (100 tasks, 10 per shard)" >&2
+  echo "  912 -> holdout_80pct_seed42 (912 tasks, complementary to the 228-task tune split; 40 shards by default)" >&2
+  echo "  100 -> tune_100tasks_seed42 (100 tasks, 10 per shard)" >&2
   echo "  --gpu-spec sets the Modal GPU request for each shard (default: ${MODAL_GPU_SPEC})" >&2
   echo "  --background-modal-cli submits all shards without waiting for each Modal CLI process (default: ${BACKGROUND_MODAL_CLI})" >&2
 }
@@ -94,10 +100,17 @@ case "$SHARD_STEM" in
   228|20pct|tune20)
     SHARD_STEM="$DEFAULT_SHARD_STEM"
     ;;
+  912|80pct|holdout|holdout80)
+    SHARD_STEM="holdout_80pct_seed42"
+    ;;
   100|100tasks|small|tune100)
     SHARD_STEM="tune_100tasks_seed42"
     ;;
 esac
+
+if [[ "$SHARD_STEM" == "holdout_80pct_seed42" && "$NUM_SHARDS_WAS_SET" == "false" ]]; then
+  NUM_SHARDS=40
+fi
 
 case "$BACKGROUND_MODAL_CLI" in
   true|false)

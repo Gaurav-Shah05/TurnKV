@@ -74,6 +74,71 @@ MODAL_EVAL_REQUIREMENTS = (
     "sentencepiece>=0.2.0,<0.3",
     "protobuf>=5.27.2,<6",
     "einops>=0.8.0,<1",
+    # BigCodeBench candidate/test execution dependencies observed in live runs
+    # and in a ConvCodeWorld/BigCodeBench import scan. These are installed into
+    # the same venv used by the subprocess executor, so generated code can
+    # import them offline.
+    "blake3>=0.4.1,<2",
+    "chardet>=5.2.0,<6",
+    "cryptography>=42.0.0,<47",
+    "django>=5.0.0,<6",
+    "flask>=3.0.0,<4",
+    "flask-login>=0.6.3,<1",
+    "flask-mail>=0.10.0,<1",
+    "flask-restful>=0.3.10,<1",
+    "flask-sqlalchemy>=3.1.1,<4",
+    "flask-wtf>=1.2.1,<2",
+    "folium>=0.17.0,<1",
+    "gensim>=4.3.0,<5",
+    "geopandas>=1.0.0,<2",
+    "geopy>=2.4.0,<3",
+    "holidays>=0.50,<1",
+    "keras>=3.0.0,<4",
+    "librosa>=0.11.0,<1",
+    "lxml>=5.2.0,<7",
+    "matplotlib>=3.9.0,<4",
+    "mechanize>=0.4.10,<0.5",
+    "pip>=24.0",
+    "pillow>=10.4.0,<12",
+    "prettytable>=3.10.0,<4",
+    "psutil>=6.0.0,<8",
+    "pycryptodome>=3.20.0,<4",
+    "pyfakefs>=5.5.0,<6",
+    "pyquery>=2.0.0,<3",
+    "pytest>=8.0.0,<9",
+    "python-dateutil>=2.9.0,<3",
+    "python-docx>=1.1.0,<2",
+    "python-http-client>=3.3.7,<4",
+    "python-Levenshtein>=0.25.0,<1",
+    "pytesseract>=0.3.13,<1",
+    "pytz>=2024.1",
+    "regex>=2024.5.15",
+    "requests-mock>=1.12.1,<2",
+    "rsa>=4.9,<5",
+    "scikit-image>=0.24.0,<1",
+    "sendgrid>=6.11.0,<7",
+    "shapely>=2.0.4,<3",
+    "soundfile>=0.12.1,<1",
+    "tensorflow-cpu>=2.16.0,<2.21",
+    "textblob>=0.18.0,<1",
+    "texttable>=1.7.0,<2",
+    "opencv-python-headless>=4.10.0,<5",
+    "sympy>=1.13.0,<2",
+    "wikipedia>=1.4.0,<2",
+    "wordninja>=2.0.0,<3",
+    "wordcloud>=1.9.3,<2",
+    "wtforms>=3.1.2,<4",
+    "werkzeug>=3.0.0,<4",
+    "xlwt>=1.3.0,<2",
+    "xmltodict>=0.13.0,<1",
+)
+FLASKEXT_MAIL_SHIM_COMMAND = (
+    "/root/kvpress/.venv/bin/python -c "
+    "\"from pathlib import Path; import sysconfig; "
+    "pkg = Path(sysconfig.get_paths()['purelib']) / 'flaskext'; "
+    "pkg.mkdir(exist_ok=True); "
+    "(pkg / '__init__.py').write_text('', encoding='utf-8'); "
+    "(pkg / 'mail.py').write_text('from flask_mail import *\\n', encoding='utf-8')\""
 )
 VLLM_INSTALL_COMMAND = (
     "uv pip install --python /root/kvpress/.venv/bin/python --upgrade --pre vllm "
@@ -110,7 +175,15 @@ def _container_eval_python() -> str:
 
 base_image = (
     modal.Image.from_registry(CUDA_BASE_IMAGE, add_python="3.11")
-    .apt_install("git", "curl", "util-linux", "build-essential", "ninja-build", "r-base-core")
+    .apt_install(
+        "git",
+        "curl",
+        "util-linux",
+        "build-essential",
+        "ninja-build",
+        "r-base-core",
+        "tesseract-ocr",
+    )
     .pip_install("uv")
     .workdir("/root/kvpress")
     .run_commands("uv venv /root/kvpress/.venv")
@@ -130,6 +203,7 @@ base_image = (
     .run_commands(
         "uv pip install --python /root/kvpress/.venv/bin/python "
         + _shell_requirements(MODAL_EVAL_REQUIREMENTS),
+        FLASKEXT_MAIL_SHIM_COMMAND,
         f"uv pip install --python /root/kvpress/.venv/bin/python --upgrade '{TRANSFORMERS_SOURCE}'",
         "/root/kvpress/.venv/bin/python -c "
         "'import transformers; print(f\"Transformers {transformers.__version__} installed\")'",

@@ -20,7 +20,7 @@ NUM_SHARDS="${NUM_SHARDS:-10}"
 BENCHMARK_MODE="${BENCHMARK_MODE:-live}"
 # Cache budgets — override for budget sweeps.
 GLOBAL_BUDGET="${GLOBAL_BUDGET:-2048}"
-LOCAL_BUDGET="${LOCAL_BUDGET:-1536}"
+LOCAL_BUDGET="${LOCAL_BUDGET:-4096}"
 MODAL_GPU_SPEC="${MODAL_GPU_SPEC:-H200}"
 FEEDBACK_MODEL="${FEEDBACK_MODEL:-google/gemma-4-26B-A4B-it}"
 FEEDBACK_ATTN_IMPLEMENTATION="${FEEDBACK_ATTN_IMPLEMENTATION:-vllm_triton}"
@@ -193,7 +193,7 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     --global-budget "$GLOBAL_BUDGET"
     --local-budget "$LOCAL_BUDGET"
     --max-turns 10
-    --max-new-tokens 2048
+    --max-new-tokens 4096
     --num-eval-examples 0
     --task-ids "@$shard_json_container"
     --output-subdir "$output_subdir"

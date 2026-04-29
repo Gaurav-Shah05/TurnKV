@@ -1,0 +1,248 @@
+{
+  "input": "/ssd1/ypatlola/15442/final_project/TurnKV/kvpress/evaluation/benchmarks/convcodeworld/splits/holdout_80pct_seed42.json",
+  "num_shards": 40,
+  "n_total": 912,
+  "stride_strategy": "interleaved (idx % num_shards)",
+  "shards": [
+    {
+      "shard": 0,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_0_of_40.json",
+      "sha256": "244a41c0cfa26f4fa5284c4c24229ecf8473e0367ad04c1183fd993dd1c7efa8"
+    },
+    {
+      "shard": 1,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_1_of_40.json",
+      "sha256": "6f6bc297750093524ecc2f9f75d89c232799e5377c70803b1b09becc56046e21"
+    },
+    {
+      "shard": 2,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_2_of_40.json",
+      "sha256": "a36c7abfb536d6805535850a1d0e7fbe9b4bea04b5cd264bcb54db26d8f19f35"
+    },
+    {
+      "shard": 3,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_3_of_40.json",
+      "sha256": "fd339305390c781fff6d4d384cac527da46d1585524c99134b3226a416df3612"
+    },
+    {
+      "shard": 4,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_4_of_40.json",
+      "sha256": "0b34dd34e2838e17e63bafa86f2d38ba57772832d79c3c9cf6502be209091ce0"
+    },
+    {
+      "shard": 5,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_5_of_40.json",
+      "sha256": "cd7b5af10d9b6cccce41c3b2009ed90a22cd8c07647e66e92ef62cd392741286"
+    },
+    {
+      "shard": 6,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_6_of_40.json",
+      "sha256": "9bb0af1e6c59b1e043644be4f88c78b4b93b1218ee1892a04f361151bb808e3e"
+    },
+    {
+      "shard": 7,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_7_of_40.json",
+      "sha256": "830d8e28faeba1aaa8b0dfcf3b9ddac6d11be0c21675facdeca9493ffcb6a893"
+    },
+    {
+      "shard": 8,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_8_of_40.json",
+      "sha256": "0bce72d8aef1912b9412ea803fdfd23413959620a2e0cf8a90f4f16fb75cfa14"
+    },
+    {
+      "shard": 9,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_9_of_40.json",
+      "sha256": "851768a0bd0a6a7a6e76f54b7fc10fb7ef9b6fbf225255fe020ee5f8edd19ada"
+    },
+    {
+      "shard": 10,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_10_of_40.json",
+      "sha256": "c4f156210bc33b800e1c028215ce2c2a14ae8957f60d3328f7002f7d000b0d18"
+    },
+    {
+      "shard": 11,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_11_of_40.json",
+      "sha256": "25cab30df30de6b08756bc9222af946c8720563cd60222fe32c499d1870395dc"
+    },
+    {
+      "shard": 12,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_12_of_40.json",
+      "sha256": "b9105de4d1890c000b9bffda89bc9268487143dcba7a442ca098b7acc8d1fc49"
+    },
+    {
+      "shard": 13,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_13_of_40.json",
+      "sha256": "3a0a399915d2256f21707f465f33f78678967e3201d9d8041907974e5f7d52f3"
+    },
+    {
+      "shard": 14,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_14_of_40.json",
+      "sha256": "1c0c53366eeb46bfb59df25e5cca40314a16c1f7fba9fde4701b0a2967df60dc"
+    },
+    {
+      "shard": 15,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_15_of_40.json",
+      "sha256": "610f37865791be726ddaebc61a310eb15d1ffd83d25fdfa3b2ecc0799674d07d"
+    },
+    {
+      "shard": 16,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_16_of_40.json",
+      "sha256": "71e9eb90f20ea1d6378809ee5b1f3a06ddcb22411b008fafb117a232feddbdc2"
+    },
+    {
+      "shard": 17,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_17_of_40.json",
+      "sha256": "e804d532d1087ffd4353f39d2df12cab35ee66a11ab314b4bdd786c2c621df05"
+    },
+    {
+      "shard": 18,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_18_of_40.json",
+      "sha256": "b7cdfb47fdbb0d87b587a94bb6831cde08ec6abe874e8c959cf9a1933d0e76b4"
+    },
+    {
+      "shard": 19,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_19_of_40.json",
+      "sha256": "acfca8e956785b43bd148785169305f5ad58aede98398e9c5319532b2d0847be"
+    },
+    {
+      "shard": 20,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_20_of_40.json",
+      "sha256": "777de887102ac1ed71b6a5bd89ddef55211db27e28380f5c53212b13ad5b8ecd"
+    },
+    {
+      "shard": 21,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_21_of_40.json",
+      "sha256": "48e832bf226c8e8c5084f39ae195501baf0175ae45f5fed94c7f29b57409e2e2"
+    },
+    {
+      "shard": 22,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_22_of_40.json",
+      "sha256": "dda555ed1702c32f10524c21ab6d2829fceadb83f4356c2fde7ebfe1ac5b6333"
+    },
+    {
+      "shard": 23,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_23_of_40.json",
+      "sha256": "812aa1ffe4ec33c03ebdf89f2c77c20cc69186a3e2a739b18f25e079e2cef658"
+    },
+    {
+      "shard": 24,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_24_of_40.json",
+      "sha256": "31b3e51f47876a96ad4de7bd213867e8c47a454aa169690115235a925dfd665b"
+    },
+    {
+      "shard": 25,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_25_of_40.json",
+      "sha256": "a3304b29d82a13125065f642b9206d457d6234ffac82c9c2e803c4616ba45ed0"
+    },
+    {
+      "shard": 26,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_26_of_40.json",
+      "sha256": "2b401b3baf0a790da3410b111559d420409f0a8a65f751a38a11b27061f4d165"
+    },
+    {
+      "shard": 27,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_27_of_40.json",
+      "sha256": "699f879e3f17c553952ab77c71b349d24842ec77b6f8be13479eeabb66480f16"
+    },
+    {
+      "shard": 28,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_28_of_40.json",
+      "sha256": "3ab164e31ae306e436af6f22982387b6995fe71d4401444d84bcebeb02fbd3b5"
+    },
+    {
+      "shard": 29,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_29_of_40.json",
+      "sha256": "e71ea3ce915f33ff2a463526e61805fe07f3434f329870d85185f9f4ed81b9fe"
+    },
+    {
+      "shard": 30,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_30_of_40.json",
+      "sha256": "af86416e5c72ae4821628b7c1a30a5226268b7cd0449652ff24d90760d740ff3"
+    },
+    {
+      "shard": 31,
+      "size": 23,
+      "path": "holdout_80pct_seed42_shard_31_of_40.json",
+      "sha256": "fcf620c40deaf206b20a1ee0a50529daf311946d20f2d209248a8f30427e59f9"
+    },
+    {
+      "shard": 32,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_32_of_40.json",
+      "sha256": "09822b7488c164ab73ffbb69ec7e7b54f57bfcc94da43634eec276bb7a622658"
+    },
+    {
+      "shard": 33,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_33_of_40.json",
+      "sha256": "093e0722e52c99ee862e95821b7c6b5350bb3fde405c894caf2981b9be6d4e0e"
+    },
+    {
+      "shard": 34,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_34_of_40.json",
+      "sha256": "08a2940b0bbfc1212c32a1980fe9374044bb951d4d6805a7fdce46b520545998"
+    },
+    {
+      "shard": 35,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_35_of_40.json",
+      "sha256": "f3b45ce9193a0f4bedd66b50cf886c25f0ca2b78d48a72efeddda7e82425a79a"
+    },
+    {
+      "shard": 36,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_36_of_40.json",
+      "sha256": "a1ecca5d41bb4b561598b0325aff52842533482716d8687422e0b2bbfb0106ff"
+    },
+    {
+      "shard": 37,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_37_of_40.json",
+      "sha256": "e060863ff67db683390faeae1db6add44ccbbf0aa960e7e74107051427722663"
+    },
+    {
+      "shard": 38,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_38_of_40.json",
+      "sha256": "2f5259132c31761477ddfae9a0b759a040826bac7d2cc11b187cafe598911426"
+    },
+    {
+      "shard": 39,
+      "size": 22,
+      "path": "holdout_80pct_seed42_shard_39_of_40.json",
+      "sha256": "dfe76533f264bf8ba0090d5d3a40c9cdb620921e609e4671c4eab81ab3e63c1b"
+    }
+  ]
+}
